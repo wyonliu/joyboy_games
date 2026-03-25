@@ -31,6 +31,7 @@ const ORB_R = 5;
 const POWERUP_R = 10;
 const PARTICLE_CAP = 800;
 const AI_COUNT = 5;
+const AI_CAP = 12;
 const MINIMAP_R = 50;
 const MINIMAP_X = W - MINIMAP_R - 12;
 const MINIMAP_Y = MINIMAP_R + 12;
@@ -46,6 +47,8 @@ interface Orb {
   hue: number; alpha: number; pulse: number;
   vx: number; vy: number;
   isEssence?: boolean; // from dead serpent — glows more
+  suckTarget?: Vec2; // target position when being "sucked in" on pickup
+  suckTimer?: number; // countdown for suck-in animation (0.1s)
 }
 
 interface Particle {
@@ -141,7 +144,7 @@ function ensureAudio() {
 }
 
 function playTone(freq: number, dur: number, vol: number, type: OscillatorType = 'sine', detune = 0) {
-  if (!audioCtx) return;
+  if (!audioCtx || audioMuted) return;
   const osc = audioCtx.createOscillator();
   const gain = audioCtx.createGain();
   osc.type = type;
@@ -154,7 +157,7 @@ function playTone(freq: number, dur: number, vol: number, type: OscillatorType =
 }
 
 function playNoise(dur: number, vol: number, freqLow: number, freqHigh: number) {
-  if (!audioCtx) return;
+  if (!audioCtx || audioMuted) return;
   const bufferSize = audioCtx.sampleRate * dur;
   const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
   const data = buffer.getChannelData(0);
@@ -248,7 +251,7 @@ function sfxKillLarge() {
 
 function sfxBoost() {
   // Bass "whooom"
-  if (!audioCtx) return;
+  if (!audioCtx || audioMuted) return;
   const osc = audioCtx.createOscillator();
   const gain = audioCtx.createGain();
   osc.type = 'sawtooth';
@@ -317,6 +320,68 @@ function sfxUITap() {
   playTone(1800, 0.03, 0.05, 'sine');
 }
 
+// ─── R3: Stage-specific evolution ceremony sounds ───────────
+function sfxEvolStage2() {
+  // Short drum + ascending tone
+  playTone(60, 0.4, 0.2, 'sine');
+  playNoise(0.15, 0.1, 80, 300);
+  setTimeout(() => {
+    playTone(440, 0.3, 0.12, 'triangle');
+    playTone(587, 0.25, 0.1, 'triangle');
+  }, 200);
+}
+
+function sfxEvolStage3() {
+  // Three ascending drums + guzheng strum
+  playTone(55, 0.5, 0.25, 'sine');
+  playNoise(0.2, 0.12, 80, 300);
+  setTimeout(() => {
+    playTone(65, 0.4, 0.22, 'sine');
+    playNoise(0.15, 0.1, 100, 350);
+  }, 250);
+  setTimeout(() => {
+    playTone(75, 0.5, 0.25, 'sine');
+    playNoise(0.2, 0.12, 60, 300);
+  }, 500);
+  // Guzheng-like strum (rapid pentatonic)
+  setTimeout(() => {
+    const guzheng = [523, 587, 659, 784, 880];
+    guzheng.forEach((n, i) => {
+      setTimeout(() => playTone(n, 0.4, 0.08, 'triangle'), i * 40);
+    });
+  }, 700);
+}
+
+function sfxEvolStage4() {
+  // Five ascending drums
+  for (let i = 0; i < 5; i++) {
+    setTimeout(() => {
+      playTone(50 + i * 5, 0.5, 0.25 + i * 0.02, 'sine');
+      playNoise(0.15, 0.1 + i * 0.02, 60 + i * 20, 250 + i * 30);
+    }, i * 200);
+  }
+  // Full pentatonic scale
+  setTimeout(() => {
+    const notes = [523, 587, 659, 784, 880, 1047];
+    notes.forEach((n, i) => {
+      setTimeout(() => {
+        playTone(n, 0.5, 0.12, 'triangle');
+        if (i === notes.length - 1) {
+          playTone(n * 2, 0.8, 0.08, 'sine');
+          playTone(n * 1.5, 0.6, 0.06, 'triangle');
+        }
+      }, i * 100);
+    });
+  }, 1000);
+  // Gong (deep resonant hit)
+  setTimeout(() => {
+    playTone(80, 1.2, 0.3, 'sine');
+    playTone(160, 0.8, 0.15, 'triangle');
+    playTone(240, 0.6, 0.08, 'sine');
+    playNoise(0.5, 0.15, 40, 200);
+  }, 1600);
+}
+
 // ─── Layered BGM System ─────────────────────────────────────
 let bgmPlaying = false;
 let masterVol = 0.5;
@@ -343,7 +408,7 @@ function startBGM() {
   bgmDroneGain = audioCtx.createGain();
   bgmDroneOsc.type = 'sine';
   bgmDroneOsc.frequency.value = 65; // C2
-  bgmDroneGain.gain.value = 0.035 * masterVol;
+  bgmDroneGain.gain.value = audioMuted ? 0 : 0.035 * masterVol;
   bgmLFO = audioCtx.createOscillator();
   const lfoGain = audioCtx.createGain();
   bgmLFO.frequency.value = 0.15;
@@ -374,13 +439,13 @@ function startWindAmbient() {
   filter.frequency.value = 400;
   filter.Q.value = 0.5;
   bgmWindGain = audioCtx.createGain();
-  bgmWindGain.gain.value = 0.012 * masterVol;
+  bgmWindGain.gain.value = audioMuted ? 0 : 0.012 * masterVol;
   bgmWindSource.connect(filter).connect(bgmWindGain).connect(audioCtx.destination);
   bgmWindSource.start();
 }
 
 function updateBGM(dt: number, isBoosting: boolean, nearBoss: boolean) {
-  if (!audioCtx || !bgmPlaying) return;
+  if (!audioCtx || !bgmPlaying || audioMuted) return;
 
   // Random pentatonic melody notes (Chinese flute feel)
   bgmMelodyTimer -= dt;
@@ -433,6 +498,14 @@ function updateBGM(dt: number, isBoosting: boolean, nearBoss: boolean) {
   }
 }
 
+function toggleMute() {
+  audioMuted = !audioMuted;
+  try { localStorage.setItem('melos_audio_muted', audioMuted ? 'true' : 'false'); } catch (_) { /* ignore */ }
+  // Mute/unmute BGM drone and wind
+  if (bgmDroneGain) bgmDroneGain.gain.value = audioMuted ? 0 : 0.035 * masterVol;
+  if (bgmWindGain) bgmWindGain.gain.value = audioMuted ? 0 : 0.012 * masterVol;
+}
+
 function stopBGM() {
   if (bgmDroneOsc) { try { bgmDroneOsc.stop(); } catch (_) { /* ignore */ } bgmDroneOsc = null; }
   if (bgmLFO) { try { bgmLFO.stop(); } catch (_) { /* ignore */ } bgmLFO = null; }
@@ -466,16 +539,55 @@ let spiritStormTimer = 0;
 let spiritStormActive = false;
 let nextBossScore = 200;
 let bossSpawned = false;
-let dailySeed = 0;
+// dailySeed removed (was dead variable — issue #9)
 let killCamTimer = 0;
 let killCamTarget: Vec2 = { x: 0, y: 0 };
 let freezeFrameTimer = 0;
 let killFlashColor = '';
 let killFlashTimer = 0;
+let shakeTimer = 0; // dampened sine wave shake
+let deathFreezeTimer = 0; // freeze → slow-mo → fade on player death
+let deathFadeAlpha = 0; // screen fade to dark on death
 let heartbeatTimer = 0;
 let surviveTimer = 0; // for "survive 3 min" achievement
 let nameInputText = '';
-let nameInputActive = false;
+// nameInputActive removed (was dead variable — issue #8)
+
+// ─── Pause & Mute (Cross-game fixes #13, #14) ──────────────
+let gamePaused = false;
+let audioMuted = false;
+// Load mute preference
+try { audioMuted = localStorage.getItem('melos_audio_muted') === 'true'; } catch (_) { /* ignore */ }
+
+// ─── Arena boundary warning state (#15) ─────────────────────
+let boundaryWarningAlpha = 0;
+
+// ─── Boost button state (#16) ───────────────────────────────
+let boostBtnPulse = 0;
+
+// ─── Gradient Cache (R3 perf: avoid per-segment gradient creation) ──
+const _gradientCache = new Map<string, CanvasGradient>();
+let _gradientCacheFrame = 0;
+function getCachedRadialGradient(
+  key: string,
+  cx: number, cy: number, r: number,
+  stops: Array<[number, string]>
+): CanvasGradient {
+  const cached = _gradientCache.get(key);
+  if (cached) return cached;
+  const grad = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, 0, cx, cy, r);
+  for (const [offset, color] of stops) grad.addColorStop(offset, color);
+  _gradientCache.set(key, grad);
+  return grad;
+}
+function clearGradientCacheIfNeeded() {
+  _gradientCacheFrame++;
+  // Clear every 60 frames to prevent stale entries
+  if (_gradientCacheFrame >= 60) {
+    _gradientCache.clear();
+    _gradientCacheFrame = 0;
+  }
+}
 
 // ─── Feeding Frenzy ─────────────────────────────────────────
 let feedStreakCount = 0;
@@ -491,6 +603,7 @@ let killStreakTimer = 0;
 const KILL_STREAK_WINDOW = 10; // seconds
 let inkWaveTimer = 0;
 let inkWaveOrigin: Vec2 = { x: 0, y: 0 };
+let inkMistCount = 0; // Fix #5: tracked counter instead of filter() every frame
 
 // ─── Arena Events ────────────────────────────────────────────
 let arenaEventTimer = 30;
@@ -508,6 +621,22 @@ let bossHealthMax = 0;
 
 // ─── Evolution Invincibility ────────────────────────────────
 let evolInvincTimer = 0;
+
+// ─── Evolution Ceremony (R3 WOW) ────────────────────────────
+let evolCeremonyStage = 0;        // which stage triggered the ceremony (2,3,4)
+let evolCeremonyTimer = 0;        // countdown timer for ceremony
+let evolCeremonyFreezeTimer = 0;  // initial freeze time
+let evolGoldenPaletteTimer = 0;   // golden background shift timer (stage 4)
+let evolDragonFleeTimer = 0;      // AI flee timer (stage 4)
+let evolDragonInvincTimer = 0;    // extra invincibility for stage 4
+let evolCalligraphyX = 0;         // calligraphy slide-in X offset
+let evolScreenFlashTimer = 0;     // white screen flash (stage 3+)
+let evolInkDripTimer = 0;         // ink drip effect timer
+
+// ─── Death Screen Evolution Card (R3 WOW) ───────────────────
+let maxEvolutionReached = 0;      // highest stage reached this run
+let totalOrbsThisRun = 0;         // orbs eaten this run
+let timeAliveThisRun = 0;         // time alive this run
 
 // Persistent state
 let highScore = 0;
@@ -658,6 +787,15 @@ function lerpAngle(a: number, b: number, t: number): number {
   return a + d * t;
 }
 function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
+
+// Fix #11: proper hex-to-rgba conversion
+function hexToRgba(hex: string, alpha: number): string {
+  const h = hex.replace('#', '');
+  const bigint = parseInt(h.length === 3
+    ? h[0]+h[0]+h[1]+h[1]+h[2]+h[2]
+    : h, 16);
+  return `rgba(${(bigint >> 16) & 255},${(bigint >> 8) & 255},${bigint & 255},${alpha})`;
+}
 function inArena(_x: number, _y: number, margin = 0) {
   return _x * _x + _y * _y < (ARENA_R - margin) * (ARENA_R - margin);
 }
@@ -727,11 +865,15 @@ function initGame() {
   bossSpawned = false;
   totalOrbsEaten = 0;
   particles = [];
+  inkMistCount = 0;
   hazards = [];
   floatingTexts = [];
   killCamTimer = 0;
   freezeFrameTimer = 0;
   killFlashTimer = 0;
+  shakeTimer = 0;
+  deathFreezeTimer = 0;
+  deathFadeAlpha = 0;
   heartbeatTimer = 0;
   surviveTimer = 0;
   feedStreakCount = 0;
@@ -747,6 +889,18 @@ function initGame() {
   activeBoss = null;
   bossHealthMax = 0;
   evolInvincTimer = 0;
+  evolCeremonyStage = 0;
+  evolCeremonyTimer = 0;
+  evolCeremonyFreezeTimer = 0;
+  evolGoldenPaletteTimer = 0;
+  evolDragonFleeTimer = 0;
+  evolDragonInvincTimer = 0;
+  evolCalligraphyX = 0;
+  evolScreenFlashTimer = 0;
+  evolInkDripTimer = 0;
+  maxEvolutionReached = 0;
+  totalOrbsThisRun = 0;
+  timeAliveThisRun = 0;
 
   const charDef = CHARACTERS[selectedChar];
   const extraLen = upgrades.startLen * 3;
@@ -783,6 +937,7 @@ function initGame() {
       color: 'rgba(100,90,70,0.03)',
       type: 'inkMist',
     });
+    inkMistCount++;
   }
 }
 
@@ -908,6 +1063,14 @@ canvas.addEventListener('mouseup', () => { mouseDown = false; });
 
 addEventListener('keydown', e => {
   keys[e.key.toLowerCase()] = true;
+  // Fix #13: pause toggle
+  if ((e.key.toLowerCase() === 'p' || e.key === 'Escape') && gameScreen === 'playing') {
+    gamePaused = !gamePaused;
+  }
+  // Fix #14: mute toggle via M key
+  if (e.key.toLowerCase() === 'm') {
+    toggleMute();
+  }
 });
 addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
 
@@ -1003,14 +1166,31 @@ function handleClick(cx: number, cy: number) {
         try { localStorage.setItem('melos_passport', JSON.stringify(passport)); } catch (_) { /* ignore */ }
         saveData();
         gameScreen = 'title';
-        nameInputActive = false;
         return;
       }
     }
     return;
   }
 
+  // Fix #13: pause button click (top-right corner, 44x44)
+  if (gameScreen === 'playing') {
+    // Pause button: top-right area
+    if (cx > W - 52 && cx < W && cy < 52) {
+      gamePaused = !gamePaused;
+      return;
+    }
+    // Fix #14: mute button during gameplay (below pause button)
+    if (cx > W - 52 && cx < W && cy > 52 && cy < 96) {
+      toggleMute();
+      return;
+    }
+    // If paused, don't process other gameplay clicks
+    if (gamePaused) return;
+  }
+
   if (gameScreen === 'title') {
+    // Fix #14: mute button on title screen (top-right)
+    if (cx > W - 52 && cy < 52) { toggleMute(); return; }
     // Rename tap area (near player name line y=425, roughly y 412-435)
     if (cy > 412 && cy < 438) { changePlayerName(); return; }
     // Play button region
@@ -1117,6 +1297,8 @@ function checkAchievements() {
 // ─── Update Logic ───────────────────────────────────────────
 function update(dt: number) {
   if (gameScreen === 'title' || gameScreen === 'charSelect' || gameScreen === 'leaderboard' || gameScreen === 'nameInput' || gameScreen === 'achievements') return;
+  // Fix #13: freeze game update when paused
+  if (gamePaused) return;
 
   if (gameScreen === 'evolution') {
     evolutionOverlay -= dt;
@@ -1159,6 +1341,13 @@ function update(dt: number) {
   const eDt = dt * slowMo;
   gameTime += eDt;
 
+  // Death fade — ramp up screen darkness after freeze ends
+  if (deathFreezeTimer > 0) {
+    deathFreezeTimer -= dt;
+  } else if (!player.alive && deathFadeAlpha < 0.6) {
+    deathFadeAlpha = Math.min(deathFadeAlpha + dt * 1.2, 0.6);
+  }
+
   // Kill streak timer
   if (killStreakTimer > 0) {
     killStreakTimer -= eDt;
@@ -1177,6 +1366,39 @@ function update(dt: number) {
   // Evolution invincibility
   if (evolInvincTimer > 0) {
     evolInvincTimer -= eDt;
+  }
+  // Dragon stage 4 extra invincibility
+  if (evolDragonInvincTimer > 0) {
+    evolDragonInvincTimer -= eDt;
+  }
+
+  // R3: Evolution ceremony timers
+  if (evolCeremonyFreezeTimer > 0) {
+    evolCeremonyFreezeTimer -= dt; // use raw dt, not eDt (freeze ignores slow-mo)
+  }
+  if (evolCeremonyTimer > 0) {
+    evolCeremonyTimer -= eDt;
+    evolCalligraphyX = Math.min(evolCalligraphyX + eDt * 600, 0); // slide from right
+  }
+  if (evolScreenFlashTimer > 0) {
+    evolScreenFlashTimer -= eDt;
+  }
+  if (evolInkDripTimer > 0) {
+    evolInkDripTimer -= eDt;
+  }
+  if (evolGoldenPaletteTimer > 0) {
+    evolGoldenPaletteTimer -= eDt;
+  }
+  if (evolDragonFleeTimer > 0) {
+    evolDragonFleeTimer -= eDt;
+  }
+
+  // Track time alive & max evolution for death card
+  if (player.alive) {
+    timeAliveThisRun += eDt;
+    if (player.stageCache > maxEvolutionReached) {
+      maxEvolutionReached = player.stageCache;
+    }
   }
 
   // Survive timer for achievement
@@ -1202,7 +1424,9 @@ function update(dt: number) {
   if (spiritStormTimer <= 0 && !spiritStormActive) {
     spiritStormActive = true;
     spiritStormTimer = 10;
-    for (let i = 0; i < 50; i++) spawnOrb();
+    // Fix #10: respect orb cap during spirit storms
+    const stormOrbs = Math.min(50, 80 - orbs.length);
+    for (let i = 0; i < stormOrbs; i++) spawnOrb();
   }
   if (spiritStormActive) {
     spiritStormTimer -= eDt;
@@ -1212,8 +1436,8 @@ function update(dt: number) {
     }
   }
 
-  // Spawn orbs continuously
-  if (orbs.length < 60 + gameTime * 0.5) {
+  // Spawn orbs continuously — Fix #10: cap at 80 total
+  if (orbs.length < Math.min(60 + gameTime * 0.5, 80)) {
     spawnOrb();
   }
 
@@ -1227,8 +1451,8 @@ function update(dt: number) {
     if (Math.random() < 0.002) spawnHazard();
   }
 
-  // Spawn ink mist
-  if (particles.filter(p => p.type === 'inkMist').length < 20) {
+  // Spawn ink mist — Fix #5: use counter instead of filter every frame
+  if (inkMistCount < 20) {
     const pos = randInArena(20);
     particles.push({
       x: pos.x, y: pos.y,
@@ -1238,6 +1462,7 @@ function update(dt: number) {
       color: 'rgba(100,90,70,0.03)',
       type: 'inkMist',
     });
+    inkMistCount++;
   }
 
   // Update hazards
@@ -1246,11 +1471,10 @@ function update(dt: number) {
     h.timer -= eDt;
     h.angle += eDt * 2;
     if (h.timer <= 0) {
-      if (h.linkedHazard) {
-        const li = hazards.indexOf(h.linkedHazard);
-        if (li >= 0) hazards.splice(li, 1);
-      }
-      hazards.splice(hazards.indexOf(h), 1);
+      // Fix #1: use filter to avoid splice index corruption with linked pairs
+      const toRemove = new Set<Hazard>([h]);
+      if (h.linkedHazard) toRemove.add(h.linkedHazard);
+      hazards = hazards.filter(hz => !toRemove.has(hz));
       continue;
     }
 
@@ -1273,11 +1497,12 @@ function update(dt: number) {
       } else if (h.kind === 'spiritGate' && h.linkedHazard) {
         if (d < 15) {
           const linked = h.linkedHazard;
-          const dx = head.x - h.x;
-          const dy = head.y - h.y;
+          // Fix #2: uniform offset for ALL segments (no double-offset)
+          const offsetX = linked.x - h.x;
+          const offsetY = linked.y - h.y;
           for (const seg of s.segs) {
-            seg.x += (linked.x - h.x) + dx;
-            seg.y += (linked.y - h.y) + dy;
+            seg.x += offsetX;
+            seg.y += offsetY;
           }
           addParticle(linked.x, linked.y, '#a8f', 'spark', 8, 3, 0.5);
         }
@@ -1297,9 +1522,12 @@ function update(dt: number) {
     addFloatingText(player.alive ? player.segs[0].x : 0, player.alive ? player.segs[0].y - 60 : 0, arenaEventActive, '#ffd700', 32, true);
 
     if (arenaEventActive === '灵潮涌动') {
-      for (let i = 0; i < 50; i++) spawnOrb();
+      // Fix #10: respect orb cap
+      const eventOrbs = Math.min(50, 80 - orbs.length);
+      for (let i = 0; i < eventOrbs; i++) spawnOrb();
     } else if (arenaEventActive === '百蛇入侵') {
-      for (let i = 0; i < 5; i++) {
+      // Fix #3: cap total AI to prevent unbounded growth
+      for (let i = 0; i < 5 && aiSerpents.length < AI_CAP; i++) {
         const idx = aiSerpents.length;
         spawnAI(idx);
       }
@@ -1371,21 +1599,24 @@ function update(dt: number) {
   bossSpawnTimer -= eDt;
   if (bossSpawnTimer <= 0 && !activeBoss) {
     bossSpawnTimer = 60;
-    const bossIdx = aiSerpents.length;
-    const def = AI_DEFS[bossIdx % AI_DEFS.length];
-    const pos = randInArena(80);
-    const boss = createSerpent(pos.x, pos.y, '远古' + def.name, '#ffd700', def.hue, false, 80, true);
-    boss.aiAggression = 0.9;
-    boss.angle = Math.random() * PI2;
-    aiSerpents.push(boss);
-    activeBoss = boss;
-    bossHealthMax = boss.segs.length;
-    addFloatingText(pos.x, pos.y - 30, '远古妖蛇现世!', '#ff4444', 30, true);
-    sfxBossAppear();
+    if (aiSerpents.length < AI_CAP) {
+      const bossIdx = aiSerpents.length;
+      const def = AI_DEFS[bossIdx % AI_DEFS.length];
+      const pos = randInArena(80);
+      const boss = createSerpent(pos.x, pos.y, '远古' + def.name, '#ffd700', def.hue, false, 80, true);
+      boss.aiAggression = 0.9;
+      boss.angle = Math.random() * PI2;
+      aiSerpents.push(boss);
+      activeBoss = boss;
+      bossHealthMax = boss.segs.length;
+      addFloatingText(pos.x, pos.y - 30, '远古妖蛇现世!', '#ff4444', 30, true);
+      sfxBossAppear();
+    }
   }
-  // Track active boss
+  // Track active boss — reset bossSpawned when boss dies (fix #4)
   if (activeBoss && !activeBoss.alive) {
     activeBoss = null;
+    bossSpawned = false;
   }
 
   // Update player input
@@ -1396,7 +1627,7 @@ function update(dt: number) {
     updateSerpent(player, eDt);
     checkOrbCollection(player);
     checkPowerUpCollection(player);
-    if (evolInvincTimer <= 0) {
+    if (evolInvincTimer <= 0 && evolDragonInvincTimer <= 0) {
       checkSelfCollision(player);
       checkBoundaryCollision(player);
       checkSerpentVsSerpentCollision(player);
@@ -1418,7 +1649,14 @@ function update(dt: number) {
       if (ai.frozenTimer <= 0) ai.frozen = false;
       continue;
     }
-    updateAI(ai, eDt);
+    // R3: All AI flee from dragon during evolution ceremony
+    if (evolDragonFleeTimer > 0 && player.alive) {
+      const away = angleTo(player.segs[0], ai.segs[0]);
+      ai.targetAngle = away;
+      ai.speed = BOOST_SPEED;
+    } else {
+      updateAI(ai, eDt);
+    }
     updateSerpent(ai, eDt);
     checkOrbCollection(ai);
     checkBoundaryCollision(ai);
@@ -1426,7 +1664,9 @@ function update(dt: number) {
   }
 
   // Score-based boss spawn (keep for backwards compat)
-  if (player.score >= nextBossScore && !bossSpawned) {
+  // Fix #4: bossSpawned stays true until boss is killed; fix nextBossScore increment
+  // R3 fix: also check !activeBoss and AI_CAP to prevent dual-path stacking
+  if (player.score >= nextBossScore && !bossSpawned && !activeBoss && aiSerpents.length < AI_CAP) {
     bossSpawned = true;
     const bossIdx = aiSerpents.length;
     const def = AI_DEFS[bossIdx % AI_DEFS.length];
@@ -1435,10 +1675,8 @@ function update(dt: number) {
     boss.aiAggression = 0.9;
     boss.angle = Math.random() * PI2;
     aiSerpents.push(boss);
-    if (!activeBoss) { activeBoss = boss; bossHealthMax = boss.segs.length; }
-    nextBossScore = nextBossScore < 500 ? 500 : 1000;
-    if (nextBossScore > 1000) nextBossScore = nextBossScore + 500;
-    bossSpawned = false;
+    activeBoss = boss; bossHealthMax = boss.segs.length;
+    nextBossScore += nextBossScore < 500 ? 300 : 500;
   }
 
   } // end freeze frame skip
@@ -1468,22 +1706,33 @@ function update(dt: number) {
       p.r += eDt * 15; // expand
     }
     p.life -= eDt;
-    if (p.life <= 0) { particles.splice(i, 1); }
+    if (p.life <= 0) {
+      if (p.type === 'inkMist') inkMistCount--;
+      // Swap-and-pop instead of splice for O(1) removal
+      particles[i] = particles[particles.length - 1];
+      particles.pop();
+    }
   }
 
-  // Update floating texts
+  // Update floating texts (swap-and-pop)
   for (let i = floatingTexts.length - 1; i >= 0; i--) {
     const ft = floatingTexts[i];
     ft.life -= eDt;
     ft.y -= 30 * eDt;
-    if (ft.life <= 0) floatingTexts.splice(i, 1);
+    if (ft.life <= 0) {
+      floatingTexts[i] = floatingTexts[floatingTexts.length - 1];
+      floatingTexts.pop();
+    }
   }
 
-  // Power-up timers
+  // Power-up timers (swap-and-pop)
   for (let i = powerUps.length - 1; i >= 0; i--) {
     powerUps[i].timer -= eDt;
     powerUps[i].pulse += eDt * 3;
-    if (powerUps[i].timer <= 0) powerUps.splice(i, 1);
+    if (powerUps[i].timer <= 0) {
+      powerUps[i] = powerUps[powerUps.length - 1];
+      powerUps.pop();
+    }
   }
 
   // Orb physics
@@ -1501,8 +1750,12 @@ function update(dt: number) {
     }
   }
 
-  // Shake decay
-  shakeAmount *= 0.9;
+  // Shake decay — dampened sine wave
+  if (shakeAmount > 0) {
+    shakeTimer += eDt;
+    shakeAmount *= 0.9;
+    if (shakeAmount < 0.1) { shakeAmount = 0; shakeTimer = 0; }
+  }
 
   // Combo timer
   if (comboTimer > 0) {
@@ -1535,12 +1788,58 @@ function update(dt: number) {
   for (const s of [player, ...aiSerpents]) {
     for (let i = s.burnTrail.length - 1; i >= 0; i--) {
       s.burnTrail[i].life -= eDt;
-      if (s.burnTrail[i].life <= 0) s.burnTrail.splice(i, 1);
+      if (s.burnTrail[i].life <= 0) { s.burnTrail[i] = s.burnTrail[s.burnTrail.length - 1]; s.burnTrail.pop(); }
     }
     if (s.evolFlashTimer > 0) s.evolFlashTimer -= eDt;
     // Blink timer
     s.blinkTimer -= eDt;
     if (s.blinkTimer <= 0) s.blinkTimer = rand(2, 5);
+
+    // Fix #6: visual trail particles moved here from renderSerpent
+    if (s.alive) {
+      const stage = getStage(s.segs.length);
+      const info = getStageInfo(stage);
+      const totalSegs = s.segs.length;
+      const head = s.segs[0];
+
+      // Ink trail behind the snake (player only) — tapered: wider at head, narrower at tail
+      if (s.isPlayer && Math.random() < 0.35) {
+        const trailFrac = rand(0.3, 0.9);
+        const trailIdx = Math.min(totalSegs - 1, Math.floor(totalSegs * trailFrac));
+        const trailSeg = s.segs[trailIdx];
+        // Taper: particles near head are bigger, near tail are smaller
+        const taperSize = (1 - trailFrac) * 0.8 + 0.2; // 1.0 at head, 0.2 at tail
+        if (particles.length < PARTICLE_CAP) {
+          particles.push({
+            x: trailSeg.x + rand(-2, 2), y: trailSeg.y + rand(-2, 2),
+            vx: rand(-0.3, 0.3), vy: rand(-0.3, 0.3),
+            life: 0.6, maxLife: 0.6,
+            r: 1.5 * taperSize + rand(0, 1),
+            color: `hsla(${info.hue},30%,30%,0.15)`,
+            type: 'trail',
+          });
+        }
+      }
+
+      // Dragon mane particles & fire (stage 4+)
+      if (stage >= 4) {
+        const charDef = CHARACTERS[s.isPlayer ? selectedChar : 0];
+        const headR = (3 + 6 * charDef.sizeMul) * 1.2;
+        if (Math.random() < 0.4) {
+          const maneAngle = s.angle + Math.PI + rand(-0.5, 0.5);
+          addParticle(
+            head.x + Math.cos(maneAngle) * headR,
+            head.y + Math.sin(maneAngle) * headR,
+            `hsla(${rand(30, 55)},80%,${rand(55, 75)}%,0.5)`, 'trail', 1, 1.5, 0.5
+          );
+        }
+        if (s.boosting) {
+          const mouthX = head.x + Math.cos(s.angle) * headR * 1.5;
+          const mouthY = head.y + Math.sin(s.angle) * headR * 1.5;
+          addParticle(mouthX, mouthY, '#f60', 'fire', 2, 2, 0.3);
+        }
+      }
+    }
   }
 
   // Camera
@@ -1548,8 +1847,8 @@ function update(dt: number) {
     camera.x += (killCamTarget.x - camera.x) * 0.15;
     camera.y += (killCamTarget.y - camera.y) * 0.15;
   } else if (player.alive) {
-    camera.x += (player.segs[0].x - camera.x) * 0.1;
-    camera.y += (player.segs[0].y - camera.y) * 0.1;
+    camera.x += (player.segs[0].x - camera.x) * 0.08;
+    camera.y += (player.segs[0].y - camera.y) * 0.08;
   }
 
   // Achievement popup timer
@@ -1574,7 +1873,7 @@ function updatePlayerInput(dt: number) {
     const dx = joystickCurrent.x - joystickStart.x;
     const dy = joystickCurrent.y - joystickStart.y;
     const jDist = Math.hypot(dx, dy);
-    if (jDist > 5) {
+    if (jDist > 15) { // Fix #17: increased dead zone from 5px to 15px
       player.targetAngle = Math.atan2(dy, dx);
     }
   } else if (!isMobile) {
@@ -1582,7 +1881,7 @@ function updatePlayerInput(dt: number) {
     const screenY = H / 2;
     const dx = mouseX - screenX;
     const dy = mouseY - screenY;
-    if (Math.hypot(dx, dy) > 5) {
+    if (Math.hypot(dx, dy) > 15) { // Fix #17: increased dead zone
       player.targetAngle = Math.atan2(dy, dx);
     }
   }
@@ -1665,7 +1964,7 @@ function updateSerpent(s: Serpent, dt: number) {
   // Active power timers
   for (let i = s.powers.length - 1; i >= 0; i--) {
     s.powers[i].remaining -= dt;
-    if (s.powers[i].remaining <= 0) s.powers.splice(i, 1);
+    if (s.powers[i].remaining <= 0) { s.powers[i] = s.powers[s.powers.length - 1]; s.powers.pop(); }
   }
 
   // Fire trail
@@ -1715,27 +2014,85 @@ function updateSerpent(s: Serpent, dt: number) {
     }
   }
 
-  // Evolution check
+  // Evolution check — R3: enhanced ceremony per stage
   const newStage = getStage(s.segs.length);
   if (newStage > s.stageCache) {
     s.stageCache = newStage;
     const info = getStageInfo(newStage);
     s.evolFlashTimer = 0.6;
     if (s.isPlayer) {
-      const evolNames: Record<number, string> = {
-        2: '化身·角蛇!',
-        3: '化身·蛟龙!',
-        4: '化身·神龙!'
-      };
-      evolutionName = evolNames[newStage] || info.name;
+      maxEvolutionReached = Math.max(maxEvolutionReached, newStage);
       evolutionStage = newStage;
-      evolutionOverlay = 1.5;
       gameScreen = 'evolution';
-      slowMoTimer = 0.5; // evolution slow-mo
-      slowMo = 0.6;
-      sfxEvolution(newStage);
 
-      // Old body segments fly outward as particles
+      // Stage-specific ceremony
+      if (newStage === 2) {
+        // 蛟 Jiao: Brief freeze, ink explosion, calligraphy slides in
+        evolutionName = '化蛟!';
+        evolCeremonyStage = 2;
+        evolCeremonyFreezeTimer = 0.5;
+        evolCeremonyTimer = 1.5;
+        evolCalligraphyX = W; // start offscreen right
+        evolutionOverlay = 1.5;
+        slowMoTimer = 0.5;
+        slowMo = 0.6;
+        sfxEvolStage2();
+        addInkExplosion(head.x, head.y, info.color, 30);
+        shakeAmount = 10; shakeTimer = 0;
+        evolInvincTimer = 2.0;
+      } else if (newStage === 3) {
+        // 螭 Chi: Longer freeze with slow-mo ramp, bigger explosion, screen flash
+        evolutionName = '化螭!';
+        evolCeremonyStage = 3;
+        evolCeremonyFreezeTimer = 0.8;
+        evolCeremonyTimer = 2.0;
+        evolCalligraphyX = W;
+        evolutionOverlay = 2.0;
+        evolScreenFlashTimer = 0.5;
+        evolInkDripTimer = 2.0;
+        slowMoTimer = 0.8;
+        slowMo = 0.4;
+        sfxEvolStage3();
+        addInkExplosion(head.x, head.y, info.color, 50);
+        addParticle(head.x, head.y, '#fff', 'ink', 40, 10, 1.5);
+        shakeAmount = 15; shakeTimer = 0;
+        evolInvincTimer = 2.0;
+      } else if (newStage === 4) {
+        // 龙 Dragon: THE BIG MOMENT — long freeze, white flash, golden particles, AI flee
+        evolutionName = '化龙!';
+        evolCeremonyStage = 4;
+        evolCeremonyFreezeTimer = 1.5;
+        evolCeremonyTimer = 3.0;
+        evolCalligraphyX = W;
+        evolutionOverlay = 3.0;
+        evolScreenFlashTimer = 1.0;
+        evolGoldenPaletteTimer = 5.0;
+        evolDragonFleeTimer = 3.0;
+        evolDragonInvincTimer = 5.0;
+        evolInkDripTimer = 3.0;
+        slowMoTimer = 1.5;
+        slowMo = 0.3;
+        sfxEvolStage4();
+        // 80 golden particles spiral outward
+        for (let pi = 0; pi < 80 && particles.length < PARTICLE_CAP; pi++) {
+          const spiralAngle = (pi / 80) * PI2 * 3;
+          const spiralSpeed = 3 + (pi / 80) * 8;
+          particles.push({
+            x: head.x, y: head.y,
+            vx: Math.cos(spiralAngle) * spiralSpeed,
+            vy: Math.sin(spiralAngle) * spiralSpeed,
+            life: 2.0, maxLife: 2.0,
+            r: rand(2, 5),
+            color: `hsl(${rand(35, 55)},100%,${rand(60, 80)}%)`,
+            type: 'inkExplosion',
+          });
+        }
+        addParticle(head.x, head.y, '#fff', 'ink', 50, 12, 2.0);
+        shakeAmount = 20; shakeTimer = 0;
+        evolInvincTimer = 5.0;
+      }
+
+      // Common: old body segments scatter outward
       for (let si = 0; si < s.segs.length; si += 2) {
         const seg = s.segs[si];
         const scatterAngle = angleTo(head, seg) + rand(-0.3, 0.3);
@@ -1747,21 +2104,11 @@ function updateSerpent(s: Serpent, dt: number) {
             vy: Math.sin(scatterAngle) * scatterSpeed,
             life: 1.0, maxLife: 1.0,
             r: rand(3, 6),
-            color: info.color,
+            color: newStage === 4 ? '#ffd700' : info.color,
             type: 'inkExplosion',
           });
         }
       }
-
-      // Full-screen ink explosion (more dramatic)
-      addInkExplosion(head.x, head.y, info.color, 80);
-      addParticle(head.x, head.y, '#fff', 'ink', 40, 10, 1.5);
-
-      // Screen shake
-      shakeAmount = 15;
-
-      // 2s invincibility after evolution
-      evolInvincTimer = 2.0;
     }
   }
 }
@@ -1769,7 +2116,8 @@ function updateSerpent(s: Serpent, dt: number) {
 function updateAI(ai: Serpent, dt: number) {
   ai.aiTimer -= dt;
 
-  ai.aiAggression = clamp(0.2 + gameTime * 0.005, 0.2, 0.95);
+  // Fix #12: logarithmic curve instead of linear cliff — asymptotes at 0.8
+  ai.aiAggression = 0.2 + 0.6 * (1 - Math.exp(-gameTime * 0.008));
   if (ai.isBoss) ai.aiAggression = 0.9;
 
   if (ai.aiTimer <= 0) {
@@ -1930,21 +2278,40 @@ function checkOrbCollection(s: Serpent) {
     const o = orbs[i];
     const d = dist(head, o);
 
-    // Magnet attraction
+    // Magnet attraction — ease-in: accelerates as orb gets closer
     if (magnetRange > 0 && d < magnetRange) {
       const a = angleTo(o, head);
-      o.vx += Math.cos(a) * 3;
-      o.vy += Math.sin(a) * 3;
+      const t = 1 - d / magnetRange;
+      const magnetSpeed = 6 * t * t; // quadratic ease-in
+      o.vx += Math.cos(a) * magnetSpeed;
+      o.vy += Math.sin(a) * magnetSpeed;
+    }
+
+    // Orb being sucked in — animate shrink toward head
+    if (o.suckTimer !== undefined && o.suckTimer > 0 && o.suckTarget) {
+      o.suckTimer -= 0.016; // ~1 frame at 60fps
+      const progress = 1 - (o.suckTimer / 0.1);
+      o.x += (o.suckTarget.x - o.x) * 0.3;
+      o.y += (o.suckTarget.y - o.y) * 0.3;
+      o.r = Math.max(0.5, o.r * (1 - progress * 0.15));
+      if (o.suckTimer <= 0) {
+        orbs[i] = orbs[orbs.length - 1];
+        orbs.pop();
+      }
+      continue;
     }
 
     if (d < 12) {
-      orbs.splice(i, 1);
+      // Start suck-in animation instead of instant removal
+      o.suckTarget = { x: head.x, y: head.y };
+      o.suckTimer = 0.1;
       const last = s.segs[s.segs.length - 1];
       s.segs.push({ x: last.x, y: last.y });
       s.score += o.val;
 
       if (s.isPlayer) {
         totalOrbsEaten++;
+        totalOrbsThisRun++;
         if (totalOrbsEaten % 10 === 0) {
           coins++;
           saveData();
@@ -1986,7 +2353,8 @@ function checkPowerUpCollection(s: Serpent) {
   for (let i = powerUps.length - 1; i >= 0; i--) {
     const p = powerUps[i];
     if (dist(head, p) < 18) {
-      powerUps.splice(i, 1);
+      powerUps[i] = powerUps[powerUps.length - 1];
+      powerUps.pop();
       sfxPowerUp();
       applyPower(s, p.kind);
       addParticle(p.x, p.y, POWER_COLORS[p.kind], 'spark', 8, 3, 0.5);
@@ -2104,11 +2472,15 @@ function killSerpent(s: Serpent, killer: Serpent | null) {
     }
 
     sfxDeath();
-    shakeAmount = 15;
+    shakeAmount = 15; shakeTimer = 0;
     killCamTimer = 1.5;
     killCamTarget = { x: head.x, y: head.y };
-    slowMoTimer = 1.0;
-    slowMo = 0.2; // Dramatic slow-mo on player death
+    // Death impact: 0.3s freeze → 0.5s slow-mo at 20% speed → fade
+    deathFreezeTimer = 0.3;
+    freezeFrameTimer = 0.3; // Hard freeze first
+    slowMoTimer = 1.3; // Total slow-mo duration (includes freeze)
+    slowMo = 0.2;
+    deathFadeAlpha = 0; // Will ramp up during the slow-mo phase
 
     leaderboard.push({
       name: nameInputText || CHARACTERS[selectedChar].name,
@@ -2229,6 +2601,7 @@ function killSerpent(s: Serpent, killer: Serpent | null) {
 
 // ─── Rendering ──────────────────────────────────────────────
 function render() {
+  clearGradientCacheIfNeeded();
   ctx.save();
   // Deep dark gradient background instead of flat black
   const mainBgGrad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, W * 0.8);
@@ -2244,8 +2617,10 @@ function render() {
   if (gameScreen === 'achievements') { renderAchievements(); ctx.restore(); return; }
 
   // Game rendering (playing, dead, evolution)
-  const shakeX = (Math.random() - 0.5) * shakeAmount;
-  const shakeY = (Math.random() - 0.5) * shakeAmount;
+  // Dampened sine wave shake — feels more cinematic than random jitter
+  const shakeDamp = shakeAmount * Math.sin(shakeTimer * 30) * Math.exp(-shakeTimer * 8);
+  const shakeX = shakeDamp * Math.cos(shakeTimer * 17);
+  const shakeY = shakeDamp * Math.sin(shakeTimer * 23);
 
   ctx.translate(W / 2 + shakeX, H / 2 + shakeY);
   ctx.translate(-camera.x, -camera.y);
@@ -2281,10 +2656,7 @@ function render() {
   for (const ft of floatingTexts) {
     const alpha = ft.life / ft.maxLife;
     ctx.save();
-    if (ft.glow) {
-      ctx.shadowColor = ft.color;
-      ctx.shadowBlur = 15;
-    }
+    // Floating text glow removed for perf (was shadowBlur=15)
     ctx.globalAlpha = alpha;
     ctx.fillStyle = ft.color;
     ctx.font = `bold ${ft.size}px "Noto Serif SC"`;
@@ -2347,11 +2719,7 @@ function render() {
   if (killFlashTimer > 0 && killFlashColor) {
     const flashAlpha = killFlashTimer / 0.1 * 0.4;
     ctx.save();
-    // Top edge
-    const grad1 = ctx.createLinearGradient(0, 0, 0, 60);
-    grad1.addColorStop(0, killFlashColor.replace(')', `,${flashAlpha})`).replace('rgb', 'rgba').replace('#', ''));
-    grad1.addColorStop(1, 'rgba(0,0,0,0)');
-    // Use a simpler approach
+    // Fix #7: removed dead gradient code that never matched
     ctx.globalAlpha = flashAlpha;
     ctx.fillStyle = killFlashColor;
     ctx.fillRect(0, 0, W, 8);
@@ -2361,15 +2729,41 @@ function render() {
     ctx.restore();
   }
 
-  // Near-death red vignette pulse
-  if (nearDeathFlash > 0 && gameScreen === 'playing') {
-    ctx.save();
-    const vignetteGrad = ctx.createRadialGradient(W / 2, H / 2, W * 0.3, W / 2, H / 2, W * 0.7);
-    vignetteGrad.addColorStop(0, 'rgba(255,0,0,0)');
-    vignetteGrad.addColorStop(1, `rgba(255,0,0,${nearDeathFlash * (0.3 + Math.sin(gameTime * 8) * 0.1)})`);
-    ctx.fillStyle = vignetteGrad;
-    ctx.fillRect(0, 0, W, H);
-    ctx.restore();
+  // Unified vignette: boundary warning (orange-red) OR near-death (blood-red), whichever is stronger
+  if (gameScreen === 'playing' && player.alive) {
+    // Compute boundary warning intensity
+    let boundaryIntensity = 0;
+    const headDist = Math.hypot(player.segs[0].x, player.segs[0].y);
+    const warningThreshold = ARENA_R * 0.85;
+    if (headDist > warningThreshold) {
+      boundaryIntensity = Math.min((headDist - warningThreshold) / (ARENA_R - warningThreshold), 1);
+      boundaryWarningAlpha = boundaryIntensity;
+      // Warning tone (subtle, once per pulse cycle)
+      if (Math.sin(gameTime * 6) > 0.95 && boundaryIntensity > 0.3) {
+        playTone(200, 0.05, 0.04, 'sine');
+      }
+    } else {
+      boundaryWarningAlpha = 0;
+    }
+
+    const vignetteIntensity = Math.max(boundaryIntensity, nearDeathFlash);
+    if (vignetteIntensity > 0) {
+      ctx.save();
+      // Choose tint: boundary = orange-red, near-death = blood-red
+      const isBoundaryDominant = boundaryIntensity > nearDeathFlash;
+      const vigR = isBoundaryDominant ? 255 : 180;
+      const vigG = isBoundaryDominant ? 80 : 0;
+      const vigB = isBoundaryDominant ? 20 : 0;
+      const pulseAlpha = vignetteIntensity * (isBoundaryDominant
+        ? (0.15 + Math.sin(gameTime * 6) * 0.08)
+        : (0.3 + Math.sin(gameTime * 8) * 0.1));
+      const vignetteGrad = ctx.createRadialGradient(W / 2, H / 2, W * 0.3, W / 2, H / 2, W * 0.7);
+      vignetteGrad.addColorStop(0, `rgba(${vigR},${vigG},${vigB},0)`);
+      vignetteGrad.addColorStop(1, `rgba(${vigR},${vigG},${vigB},${pulseAlpha})`);
+      ctx.fillStyle = vignetteGrad;
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+    }
   }
 
   // Evolution overlay
@@ -2385,6 +2779,30 @@ function render() {
     ctx.font = 'bold 18px "Noto Serif SC"';
     ctx.textAlign = 'center';
     ctx.fillText('灵 气 风 暴', W / 2, 80);
+  }
+
+  // R3: Golden palette shift after stage 4 evolution (5 seconds)
+  if (evolGoldenPaletteTimer > 0 && (gameScreen === 'playing' || gameScreen === 'evolution')) {
+    ctx.save();
+    const goldenAlpha = Math.min(evolGoldenPaletteTimer / 1.0, 1) * 0.08;
+    const goldenGrad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, W);
+    goldenGrad.addColorStop(0, `rgba(255,200,60,${goldenAlpha})`);
+    goldenGrad.addColorStop(0.5, `rgba(255,180,30,${goldenAlpha * 0.5})`);
+    goldenGrad.addColorStop(1, `rgba(200,150,0,${goldenAlpha * 0.2})`);
+    ctx.fillStyle = goldenGrad;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
+  // R3: Dragon invincibility golden glow trail
+  if (evolDragonInvincTimer > 0 && player.alive && gameScreen === 'playing') {
+    ctx.save();
+    const glowAlpha = Math.min(evolDragonInvincTimer / 1.0, 1) * 0.15;
+    // Golden border glow
+    ctx.strokeStyle = `rgba(255,200,60,${glowAlpha})`;
+    ctx.lineWidth = 4;
+    ctx.strokeRect(2, 2, W - 4, H - 4);
+    ctx.restore();
   }
 
   // Screen edge golden sparkle trail when boosting at high speed
@@ -2403,6 +2821,14 @@ function render() {
       ctx.arc(rand(0, W), H - rand(0, 6), rand(1, 2.5), 0, PI2);
       ctx.fill();
     }
+    ctx.restore();
+  }
+
+  // Death fade overlay — darkens screen during slow-mo before death screen
+  if (deathFadeAlpha > 0 && !player.alive) {
+    ctx.save();
+    ctx.fillStyle = `rgba(0,0,0,${deathFadeAlpha})`;
+    ctx.fillRect(0, 0, W, H);
     ctx.restore();
   }
 
@@ -2429,6 +2855,98 @@ function render() {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(`印章: ${ap.name}`, W / 2, 125);
+    ctx.restore();
+  }
+
+  // Fix #15: boundary warning vignette is now handled by the unified vignette system above
+
+  // Fix #16: Boost button for mobile
+  if (isMobile && gameScreen === 'playing' && player.alive) {
+    boostBtnPulse = (boostBtnPulse + 0.05) % PI2;
+    const boostBtnX = W - 55;
+    const boostBtnY = H - 100;
+    const boostBtnR = 30;
+    const isBoosting = tapBoost;
+    const pulseScale = isBoosting ? 1 + Math.sin(boostBtnPulse * 4) * 0.1 : 1;
+    ctx.save();
+    ctx.globalAlpha = isBoosting ? 0.5 : 0.25;
+    ctx.fillStyle = isBoosting ? 'rgba(255,200,60,0.6)' : 'rgba(200,180,140,0.3)';
+    ctx.beginPath();
+    ctx.arc(boostBtnX, boostBtnY, boostBtnR * pulseScale, 0, PI2);
+    ctx.fill();
+    ctx.strokeStyle = isBoosting ? 'rgba(255,220,80,0.6)' : 'rgba(200,180,140,0.3)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.globalAlpha = isBoosting ? 0.8 : 0.4;
+    ctx.fillStyle = isBoosting ? '#ffd700' : '#ccc';
+    ctx.font = 'bold 20px "Noto Serif SC"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('冲', boostBtnX, boostBtnY);
+    ctx.restore();
+  }
+
+  // Fix #13: Pause button (top-right during gameplay)
+  if ((gameScreen === 'playing' || gameScreen === 'evolution') && !gamePaused) {
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    roundRect(ctx, W - 46, 6, 40, 40, 8, true);
+    ctx.fillStyle = '#ddd';
+    // Pause icon: two vertical bars
+    ctx.fillRect(W - 35, 14, 5, 24);
+    ctx.fillRect(W - 24, 14, 5, 24);
+    ctx.restore();
+  }
+
+  // Fix #14: Mute button (below pause during gameplay, top-right on title)
+  if (gameScreen === 'playing' || gameScreen === 'evolution') {
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    roundRect(ctx, W - 46, 52, 40, 36, 8, true);
+    ctx.fillStyle = audioMuted ? '#f66' : '#ddd';
+    ctx.font = '16px "Noto Serif SC"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(audioMuted ? '静' : '音', W - 26, 70);
+    ctx.restore();
+  }
+
+  // Fix #13: Pause overlay with ink-wash style
+  if (gamePaused && gameScreen === 'playing') {
+    ctx.save();
+    // Semi-transparent ink-wash overlay
+    ctx.fillStyle = 'rgba(10,8,5,0.7)';
+    ctx.fillRect(0, 0, W, H);
+    // Decorative ink border
+    ctx.strokeStyle = 'rgba(180,160,120,0.2)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(30, 30, W - 60, H - 60);
+    // "暂停" text with ink-wash calligraphy style
+    ctx.shadowColor = 'rgba(200,160,64,0.6)';
+    ctx.shadowBlur = 20;
+    ctx.fillStyle = '#c8a040';
+    ctx.font = 'bold 48px "Noto Serif SC"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('暂停', W / 2, H / 2 - 30);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'rgba(200,180,140,0.6)';
+    ctx.font = '16px "Noto Serif SC"';
+    ctx.fillText('点击右上角或按 P 继续', W / 2, H / 2 + 30);
+    // Pause button becomes resume
+    ctx.globalAlpha = 0.7;
+    ctx.fillStyle = 'rgba(60,120,60,0.6)';
+    roundRect(ctx, W - 46, 6, 40, 40, 8, true);
+    ctx.fillStyle = '#fff';
+    // Play triangle icon
+    ctx.beginPath();
+    ctx.moveTo(W - 35, 14);
+    ctx.lineTo(W - 35, 38);
+    ctx.lineTo(W - 14, 26);
+    ctx.closePath();
+    ctx.fill();
     ctx.restore();
   }
 }
@@ -2619,8 +3137,6 @@ function renderArenaBackground() {
     ctx.save();
     ctx.strokeStyle = `rgba(255,215,0,${0.5 + Math.sin(gameTime * 8) * 0.3})`;
     ctx.lineWidth = 4;
-    ctx.shadowColor = '#ffd700';
-    ctx.shadowBlur = 15;
     ctx.beginPath();
     ctx.moveTo(spiritLineStart.x, spiritLineStart.y);
     ctx.lineTo(spiritLineEnd.x, spiritLineEnd.y);
@@ -2847,9 +3363,9 @@ function renderPowerUps() {
     const r = POWERUP_R * pulse;
     const col = POWER_COLORS[p.kind];
 
-    // Outer glow with radial gradient
+    // Outer glow with radial gradient — Fix #11: use proper hex-to-rgba
     const outerGrad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 3);
-    outerGrad.addColorStop(0, col.replace(')', ',0.15)').replace('rgb', 'rgba').replace('#ff0', 'rgba(255,255,0,0.15)').replace('#0ff', 'rgba(0,255,255,0.15)').replace('#f0f', 'rgba(255,0,255,0.15)').replace('#f80', 'rgba(255,136,0,0.15)').replace('#8ef', 'rgba(136,238,255,0.15)').replace('#f44', 'rgba(255,68,68,0.15)').replace('#aaf', 'rgba(170,170,255,0.15)'));
+    outerGrad.addColorStop(0, hexToRgba(col, 0.15));
     outerGrad.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = outerGrad;
     ctx.beginPath();
@@ -2871,10 +3387,8 @@ function renderPowerUps() {
     }
     ctx.restore();
 
-    // Hexagonal frame with glow
+    // Hexagonal frame (no shadowBlur — perf)
     ctx.save();
-    ctx.shadowColor = col;
-    ctx.shadowBlur = 8;
     // Hex fill (gradient from dark center)
     const hexGrad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
     hexGrad.addColorStop(0, 'rgba(30,28,22,0.9)');
@@ -2894,10 +3408,8 @@ function renderPowerUps() {
     ctx.stroke();
     ctx.restore();
 
-    // Label
+    // Label (no shadowBlur — perf)
     ctx.save();
-    ctx.shadowColor = col;
-    ctx.shadowBlur = 6;
     ctx.fillStyle = col;
     ctx.font = `bold ${Math.floor(r)}px "Noto Serif SC"`;
     ctx.textAlign = 'center';
@@ -2992,13 +3504,7 @@ function renderSerpent(s: Serpent) {
 
   const totalSegs = s.segs.length;
 
-  // Ink trail behind the snake
-  if (s.isPlayer && Math.random() < 0.3) {
-    const trailIdx = Math.min(totalSegs - 1, Math.floor(totalSegs * 0.8));
-    const trailSeg = s.segs[trailIdx];
-    addParticle(trailSeg.x + rand(-2, 2), trailSeg.y + rand(-2, 2),
-      `hsla(${s.isPlayer ? info.hue : s.hue},30%,30%,0.15)`, 'trail', 1, 0.3, 0.6);
-  }
+  // Fix #6: ink trail particle spawning moved to update function
 
   // Feeding frenzy golden glow
   if (s.isPlayer && feedFrenzyTimer > 0) {
@@ -3053,6 +3559,29 @@ function renderSerpent(s: Serpent) {
       ctx.arc(seg.x, seg.y, 14 * sizeMul, 0, PI2);
       ctx.fill();
     }
+    ctx.restore();
+  }
+
+  // Smooth body ribbon — bezier curves between segment midpoints for flowing look
+  if (totalSegs > 4 && s.isPlayer) {
+    ctx.save();
+    const ribHue = s.isPlayer ? info.hue : s.hue;
+    const ribSat = s.isPlayer ? 60 : 35;
+    const ribLit = s.isPlayer ? 42 : 28;
+    ctx.strokeStyle = `hsla(${ribHue},${ribSat}%,${ribLit}%,0.2)`;
+    ctx.lineWidth = (3 + 4 * sizeMul) * 2.2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(s.segs[0].x, s.segs[0].y);
+    for (let i = 1; i < totalSegs - 1; i += 2) {
+      const curr = s.segs[i];
+      const next = s.segs[Math.min(i + 1, totalSegs - 1)];
+      const midX = (curr.x + next.x) / 2;
+      const midY = (curr.y + next.y) / 2;
+      ctx.quadraticCurveTo(curr.x, curr.y, midX, midY);
+    }
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -3112,32 +3641,29 @@ function renderSerpent(s: Serpent) {
     const segX = seg.x;
     const segY = seg.y + undulate;
 
-    // Outer glow (shadowBlur) — brighter for player
+    // Outer glow — player only gets shadowBlur, AI gets cheap solid glow
     if (bodyW > 2) {
       ctx.save();
       if (s.isPlayer) {
         ctx.shadowColor = `rgba(255,200,60,0.5)`;
         ctx.shadowBlur = bodyW * 1.5;
-      } else {
-        ctx.shadowColor = `hsla(${hue},${sat}%,${lit + 15}%,0.3)`;
-        ctx.shadowBlur = bodyW * 0.6;
+        ctx.fillStyle = `hsl(${hue},${sat}%,${lit}%)`;
+        ctx.beginPath();
+        ctx.arc(segX, segY, bodyW, 0, PI2);
+        ctx.fill();
       }
-      ctx.fillStyle = `hsl(${hue},${sat}%,${lit}%)`;
-      ctx.beginPath();
-      ctx.arc(segX, segY, bodyW, 0, PI2);
-      ctx.fill();
       ctx.restore();
     }
 
-    // 3-tone gradient body (shadow -> base -> highlight)
-    if (bodyW > 1.5) {
-      const bodyGrad = ctx.createRadialGradient(
-        segX - bodyW * 0.3, segY - bodyW * 0.3, 0,
-        segX, segY, bodyW
-      );
-      bodyGrad.addColorStop(0, `hsl(${hue},${Math.min(sat + 15, 100)}%,${Math.min(lit + 18, 90)}%)`);
-      bodyGrad.addColorStop(0.5, `hsl(${hue},${sat}%,${lit}%)`);
-      bodyGrad.addColorStop(1, `hsl(${hue},${Math.max(sat - 5, 0)}%,${Math.max(lit - 12, 10)}%)`);
+    // Body fill — player gets 3-tone radial gradient, AI gets solid fill (60%+ perf savings)
+    if (s.isPlayer && bodyW > 1.5) {
+      const bwRound = Math.round(bodyW * 2) / 2; // quantize to reduce cache keys
+      const gradKey = `body_${Math.round(hue)}_${Math.round(sat)}_${Math.round(lit)}_${bwRound}`;
+      const bodyGrad = getCachedRadialGradient(gradKey, segX, segY, bodyW, [
+        [0, `hsl(${hue},${Math.min(sat + 15, 100)}%,${Math.min(lit + 18, 90)}%)`],
+        [0.5, `hsl(${hue},${sat}%,${lit}%)`],
+        [1, `hsl(${hue},${Math.max(sat - 5, 0)}%,${Math.max(lit - 12, 10)}%)`],
+      ]);
       ctx.fillStyle = bodyGrad;
     } else {
       ctx.fillStyle = `hsl(${hue},${sat}%,${lit}%)`;
@@ -3211,9 +3737,11 @@ function renderSerpent(s: Serpent) {
       ctx.restore();
     }
 
-    // Outline
-    ctx.strokeStyle = `hsla(${hue},${sat + 10}%,${Math.max(lit - 15, 8)}%,0.45)`;
-    ctx.lineWidth = 0.6;
+    // Outline — AI gets a lighter outline to compensate for no gradient
+    ctx.strokeStyle = s.isPlayer
+      ? `hsla(${hue},${sat + 10}%,${Math.max(lit - 15, 8)}%,0.45)`
+      : `hsla(${hue},${sat + 10}%,${Math.min(lit + 12, 80)}%,0.35)`;
+    ctx.lineWidth = s.isPlayer ? 0.6 : 0.8;
     ctx.beginPath();
     ctx.arc(segX, segY, bodyW, 0, PI2);
     ctx.stroke();
@@ -3232,8 +3760,6 @@ function renderSerpent(s: Serpent) {
     const tailLen = 8 * sizeMul;
     const hue3 = s.isPlayer ? info.hue : s.hue;
     ctx.save();
-    ctx.shadowColor = evolFlashing ? '#fff' : `hsl(${hue3},50%,40%)`;
-    ctx.shadowBlur = 4;
     ctx.fillStyle = evolFlashing ? '#fff' : `hsl(${hue3},45%,35%)`;
     ctx.beginPath();
     ctx.moveTo(
@@ -3284,20 +3810,21 @@ function renderSerpent(s: Serpent) {
     ctx.restore();
   }
 
-  // Head glow with shadowBlur
+  // Head glow — player gets shadowBlur, AI gets simple fill (perf)
   ctx.save();
   if (s.isPlayer) {
     ctx.shadowColor = 'rgba(255,200,60,0.6)';
     ctx.shadowBlur = headR * 2.5;
     ctx.fillStyle = 'rgba(255,200,60,0.18)';
+    ctx.beginPath();
+    ctx.arc(head.x, head.y, headR * 2, 0, PI2);
+    ctx.fill();
   } else {
-    ctx.shadowColor = isDragon ? 'rgba(255,180,40,0.4)' : `hsla(${hue2},60%,50%,0.3)`;
-    ctx.shadowBlur = headR * 1.5;
-    ctx.fillStyle = `hsla(${hue2},60%,50%,0.12)`;
+    ctx.fillStyle = `hsla(${hue2},60%,50%,0.08)`;
+    ctx.beginPath();
+    ctx.arc(head.x, head.y, headR * 1.8, 0, PI2);
+    ctx.fill();
   }
-  ctx.beginPath();
-  ctx.arc(head.x, head.y, headR * 2, 0, PI2);
-  ctx.fill();
   ctx.restore();
 
   // Head with gradient
@@ -3365,12 +3892,14 @@ function renderSerpent(s: Serpent) {
     const ex = head.x + Math.cos(eyeAngle + side * 0.5) * eyeOffset;
     const ey = head.y + Math.sin(eyeAngle + side * 0.5) * eyeOffset;
 
-    // Eye glow
+    // Eye glow — player gets shadowBlur, AI skips it
     if (!isBlinking) {
       ctx.save();
       const glowColor = isDragon ? 'rgba(255,160,0,0.35)' : stage >= 3 ? 'rgba(160,80,255,0.25)' : stage >= 2 ? 'rgba(80,160,255,0.2)' : s.isPlayer ? 'rgba(100,200,100,0.15)' : `hsla(${s.hue},50%,50%,0.1)`;
-      ctx.shadowColor = glowColor;
-      ctx.shadowBlur = eyeR * 3;
+      if (s.isPlayer) {
+        ctx.shadowColor = glowColor;
+        ctx.shadowBlur = eyeR * 3;
+      }
       ctx.fillStyle = glowColor;
       ctx.beginPath();
       ctx.arc(ex, ey, eyeR * 2, 0, PI2);
@@ -3464,8 +3993,10 @@ function renderSerpent(s: Serpent) {
       const hornLen = headR * (stage >= 4 ? 2.8 : 2);
 
       ctx.save();
-      ctx.shadowColor = isDragon ? 'rgba(200,160,60,0.3)' : `hsla(${hue2},50%,50%,0.2)`;
-      ctx.shadowBlur = 4;
+      if (s.isPlayer) {
+        ctx.shadowColor = isDragon ? 'rgba(200,160,60,0.3)' : `hsla(${hue2},50%,50%,0.2)`;
+        ctx.shadowBlur = 4;
+      }
       ctx.strokeStyle = isDragon ? '#c8a040' : `hsl(${hue2},45%,50%)`;
       ctx.lineWidth = stage >= 4 ? 3.5 : 2.5;
       ctx.lineCap = 'round';
@@ -3493,8 +4024,10 @@ function renderSerpent(s: Serpent) {
       const wx = head.x + Math.cos(s.angle) * headR;
       const wy = head.y + Math.sin(s.angle) * headR;
       ctx.save();
-      ctx.shadowColor = 'rgba(255,200,80,0.3)';
-      ctx.shadowBlur = 6;
+      if (s.isPlayer) {
+        ctx.shadowColor = 'rgba(255,200,80,0.3)';
+        ctx.shadowBlur = 6;
+      }
       ctx.strokeStyle = `hsla(45,70%,60%,0.7)`;
       ctx.lineWidth = 2;
       ctx.lineCap = 'round';
@@ -3511,29 +4044,16 @@ function renderSerpent(s: Serpent) {
       ctx.restore();
     }
 
-    // Mane particles (flowing from behind head)
-    if (Math.random() < 0.4) {
-      const maneAngle = s.angle + Math.PI + rand(-0.5, 0.5);
-      addParticle(
-        head.x + Math.cos(maneAngle) * headR,
-        head.y + Math.sin(maneAngle) * headR,
-        `hsla(${rand(30, 55)},80%,${rand(55, 75)}%,0.5)`, 'trail', 1, 1.5, 0.5
-      );
-    }
-
-    // Fire from mouth when boosting
-    if (s.boosting) {
-      const mouthX = head.x + Math.cos(s.angle) * headR * 1.5;
-      const mouthY = head.y + Math.sin(s.angle) * headR * 1.5;
-      addParticle(mouthX, mouthY, '#f60', 'fire', 2, 2, 0.3);
-    }
+    // Fix #6: mane particles and fire-from-mouth moved to update function
   }
 
-  // Shield visual — enhanced with glow
+  // Shield visual — player gets glow, AI plain
   if (hasShield) {
     ctx.save();
-    ctx.shadowColor = 'rgba(0,255,255,0.5)';
-    ctx.shadowBlur = 8;
+    if (s.isPlayer) {
+      ctx.shadowColor = 'rgba(0,255,255,0.5)';
+      ctx.shadowBlur = 8;
+    }
     ctx.strokeStyle = 'rgba(0,255,255,0.4)';
     ctx.lineWidth = 2;
     ctx.setLineDash([4, 4]);
@@ -3595,11 +4115,9 @@ function renderSerpent(s: Serpent) {
     ctx.restore();
   }
 
-  // Name label — with subtle shadow (AI snakes)
+  // Name label (AI snakes — no shadowBlur for perf)
   if (!s.isPlayer) {
     ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,0.5)';
-    ctx.shadowBlur = 3;
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
     ctx.font = `${s.isBoss ? 'bold ' : ''}11px "Noto Serif SC"`;
     ctx.textAlign = 'center';
@@ -3648,10 +4166,8 @@ function renderHUD() {
   ctx.font = '13px "Noto Serif SC"';
   ctx.fillText(`分 ${player.score}`, 12, 40);
 
-  // Center: stage name with glow
+  // Center: stage name (no shadowBlur — perf)
   ctx.save();
-  ctx.shadowColor = info.color;
-  ctx.shadowBlur = 8;
   ctx.fillStyle = info.color;
   ctx.textAlign = 'center';
   ctx.font = 'bold 14px "Noto Serif SC"';
@@ -3678,8 +4194,17 @@ function renderHUD() {
     barGrad.addColorStop(1, `hsla(${info.hue},70%,70%,0.9)`);
     ctx.fillStyle = barGrad;
     roundRect(ctx, barX, barY, barW2 * clamp(progress, 0, 1), barH2, 3, true);
-    // Glow when close to evolution
-    if (progress > 0.7 && stage < 4) {
+    // Glow + pulse when close to evolution (>80%)
+    if (progress > 0.8 && stage < 4) {
+      const pulseIntensity = (progress - 0.8) / 0.2; // 0→1 as progress goes 80%→100%
+      ctx.shadowColor = info.color;
+      ctx.shadowBlur = 10 + Math.sin(gameTime * 8) * 6 * pulseIntensity;
+      roundRect(ctx, barX, barY, barW2 * clamp(progress, 0, 1), barH2, 3, true);
+      // Pulsing bright border
+      ctx.strokeStyle = `hsla(${info.hue},80%,70%,${0.3 + Math.sin(gameTime * 8) * 0.2 * pulseIntensity})`;
+      ctx.lineWidth = 1;
+      roundRect(ctx, barX, barY, barW2 * clamp(progress, 0, 1), barH2, 3, false, true);
+    } else if (progress > 0.7 && stage < 4) {
       ctx.shadowColor = info.color;
       ctx.shadowBlur = 8 + Math.sin(gameTime * 6) * 4;
       roundRect(ctx, barX, barY, barW2 * clamp(progress, 0, 1), barH2, 3, true);
@@ -3729,8 +4254,6 @@ function renderHUD() {
     ctx.fillStyle = `rgba(255,215,0,${0.6 + Math.sin(gameTime * 10) * 0.3})`;
     ctx.font = 'bold 18px "Noto Serif SC"';
     ctx.textAlign = 'center';
-    ctx.shadowColor = '#ffd700';
-    ctx.shadowBlur = 10;
     ctx.fillText(`暴食模式 ${feedFrenzyTimer.toFixed(1)}s`, W / 2, 95);
     ctx.restore();
   }
@@ -3755,11 +4278,13 @@ function renderHUD() {
   }
 
   // Evolution invincibility indicator
-  if (evolInvincTimer > 0 && gameScreen === 'playing') {
+  const activeInvincTimer = Math.max(evolInvincTimer, evolDragonInvincTimer);
+  if (activeInvincTimer > 0 && gameScreen === 'playing') {
+    const isDragonInvinc = evolDragonInvincTimer > evolInvincTimer;
     ctx.fillStyle = `rgba(255,215,0,${0.4 + Math.sin(gameTime * 12) * 0.3})`;
     ctx.font = '13px "Noto Serif SC"';
     ctx.textAlign = 'center';
-    ctx.fillText(`无敌 ${evolInvincTimer.toFixed(1)}s`, W / 2, 135);
+    ctx.fillText(`${isDragonInvinc ? '龙威' : '无敌'} ${activeInvincTimer.toFixed(1)}s`, W / 2, 135);
   }
 
   if (isMobile && gameScreen === 'playing') {
@@ -3846,48 +4371,79 @@ function renderMinimap() {
 }
 
 function renderEvolutionOverlay() {
-  const progress = 1 - evolutionOverlay / 1.5;
-  const alpha = progress < 0.2 ? progress / 0.2 : progress > 0.75 ? (1 - progress) / 0.25 : 1;
+  const maxDuration = evolCeremonyStage === 4 ? 3.0 : evolCeremonyStage === 3 ? 2.0 : 1.5;
+  const progress = 1 - evolutionOverlay / maxDuration;
+  const alpha = progress < 0.15 ? progress / 0.15 : progress > 0.75 ? (1 - progress) / 0.25 : 1;
   const info = getStageInfo(evolutionStage);
   const isGoldStage = evolutionStage >= 4;
+  const isChiStage = evolutionStage >= 3;
 
-  // Quick white flash at start
-  if (progress < 0.08) {
+  // Stage 4: Screen goes white then reveals with ink wash
+  if (isGoldStage && evolScreenFlashTimer > 0) {
+    const flashProgress = 1 - evolScreenFlashTimer / 1.0;
+    if (flashProgress < 0.3) {
+      // Fade to white
+      const whiteAlpha = Math.min(flashProgress / 0.3, 1) * 0.9;
+      ctx.fillStyle = `rgba(255,255,255,${whiteAlpha})`;
+      ctx.fillRect(0, 0, W, H);
+    } else if (flashProgress < 0.6) {
+      // Hold white then start fading with golden tint
+      const fadeOut = (flashProgress - 0.3) / 0.3;
+      const whiteAlpha = (1 - fadeOut) * 0.9;
+      ctx.fillStyle = `rgba(255,${Math.floor(240 - fadeOut * 40)},${Math.floor(200 - fadeOut * 100)},${whiteAlpha})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+  } else if (isChiStage && !isGoldStage && evolScreenFlashTimer > 0) {
+    // Stage 3: Brief white flash
+    const flashAlpha = evolScreenFlashTimer / 0.5 * 0.6;
+    ctx.fillStyle = `rgba(255,255,255,${flashAlpha})`;
+    ctx.fillRect(0, 0, W, H);
+  } else if (progress < 0.08) {
+    // Stage 2: Quick white flash at start
     const flashAlpha = (1 - progress / 0.08) * 0.7;
     ctx.fillStyle = `rgba(255,255,255,${flashAlpha})`;
     ctx.fillRect(0, 0, W, H);
   }
 
-  // Semi-transparent overlay banner at top (not full darken — keep gameplay visible)
-  const bannerH = 160;
+  // Semi-transparent overlay banner
+  const bannerH = isGoldStage ? 200 : 160;
   const bannerY = H / 2 - bannerH / 2;
   ctx.save();
   const bannerGrad = ctx.createLinearGradient(0, bannerY - 30, 0, bannerY + bannerH + 30);
   bannerGrad.addColorStop(0, 'rgba(0,0,0,0)');
-  bannerGrad.addColorStop(0.15, `rgba(0,0,0,${alpha * 0.65})`);
-  bannerGrad.addColorStop(0.5, `rgba(0,0,0,${alpha * 0.75})`);
-  bannerGrad.addColorStop(0.85, `rgba(0,0,0,${alpha * 0.65})`);
+  bannerGrad.addColorStop(0.15, `rgba(0,0,0,${alpha * (isGoldStage ? 0.75 : 0.65)})`);
+  bannerGrad.addColorStop(0.5, `rgba(0,0,0,${alpha * (isGoldStage ? 0.85 : 0.75)})`);
+  bannerGrad.addColorStop(0.85, `rgba(0,0,0,${alpha * (isGoldStage ? 0.75 : 0.65)})`);
   bannerGrad.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = bannerGrad;
   ctx.fillRect(0, bannerY - 30, W, bannerH + 60);
   ctx.restore();
 
-  // Expanding ring burst (quick)
+  // Expanding ring burst
   if (progress < 0.4) {
     const ringProgress = progress / 0.4;
-    const expR = ringProgress * Math.max(W, H) * 0.6;
-    const ringAlpha = (1 - ringProgress) * 0.15;
+    const expR = ringProgress * Math.max(W, H) * (isGoldStage ? 0.8 : 0.6);
+    const ringAlpha = (1 - ringProgress) * (isGoldStage ? 0.25 : 0.15);
     ctx.save();
     ctx.strokeStyle = isGoldStage ? `rgba(255,215,0,${ringAlpha})` : `hsla(${info.hue},60%,60%,${ringAlpha})`;
-    ctx.lineWidth = 6 * (1 - ringProgress);
+    ctx.lineWidth = (isGoldStage ? 10 : 6) * (1 - ringProgress);
     ctx.beginPath();
     ctx.arc(W / 2, H / 2, expR, 0, PI2);
     ctx.stroke();
+    // Stage 4: second golden ring
+    if (isGoldStage && ringProgress > 0.1) {
+      const ring2Progress = (ringProgress - 0.1) / 0.9;
+      ctx.strokeStyle = `rgba(255,180,0,${(1 - ring2Progress) * 0.15})`;
+      ctx.lineWidth = 4 * (1 - ring2Progress);
+      ctx.beginPath();
+      ctx.arc(W / 2, H / 2, ring2Progress * Math.max(W, H) * 0.6, 0, PI2);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 
   // Single white flash pulse
-  if (progress < 0.3) {
+  if (progress < 0.3 && !isGoldStage) {
     const flashAlpha = Math.sin(progress / 0.3 * Math.PI) * 0.25;
     if (flashAlpha > 0) {
       ctx.fillStyle = `rgba(255,255,255,${flashAlpha})`;
@@ -3895,30 +4451,63 @@ function renderEvolutionOverlay() {
     }
   }
 
-  // Evolution calligraphy — scaled entrance, with glow
+  // Evolution calligraphy — slides in from right with glow
+  const textX = W / 2 + Math.max(evolCalligraphyX, 0);
   ctx.save();
   ctx.shadowColor = isGoldStage ? '#ffd700' : info.color;
-  ctx.shadowBlur = 35 + Math.sin(gameTime * 8) * 10;
+  ctx.shadowBlur = isGoldStage ? 50 + Math.sin(gameTime * 8) * 15 : 35 + Math.sin(gameTime * 8) * 10;
   ctx.fillStyle = isGoldStage ? '#ffd700' : info.color;
   ctx.globalAlpha = alpha;
 
   const textScale = progress < 0.2 ? 0.6 + (progress / 0.2) * 0.4 : 1;
-  ctx.font = `bold ${Math.floor(52 * textScale)}px "Noto Serif SC"`;
+  const fontSize = isGoldStage ? 60 : 52;
+  ctx.font = `bold ${Math.floor(fontSize * textScale)}px "Noto Serif SC"`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(evolutionName, W / 2, H / 2 - 15);
+  ctx.fillText(evolutionName, textX, H / 2 - 15);
 
-  // Second glow layer
-  ctx.shadowBlur = 50;
-  ctx.globalAlpha = alpha * 0.25;
-  ctx.fillText(evolutionName, W / 2, H / 2 - 15);
+  // Second glow layer (stronger for dragon)
+  ctx.shadowBlur = isGoldStage ? 80 : 50;
+  ctx.globalAlpha = alpha * (isGoldStage ? 0.4 : 0.25);
+  ctx.fillText(evolutionName, textX, H / 2 - 15);
+
+  // Stage 4: golden glow halo behind text
+  if (isGoldStage && alpha > 0.3) {
+    ctx.globalAlpha = alpha * 0.15;
+    ctx.shadowBlur = 100;
+    ctx.shadowColor = '#ffd700';
+    ctx.font = `bold ${Math.floor(fontSize * textScale * 1.05)}px "Noto Serif SC"`;
+    ctx.fillText(evolutionName, textX, H / 2 - 15);
+  }
   ctx.restore();
 
-  // Particles around text
-  const particleCount = isGoldStage ? 4 : 2;
+  // Ink drip effect (stage 3+)
+  if (evolInkDripTimer > 0 && isChiStage) {
+    ctx.save();
+    const dripAlpha = Math.min(evolInkDripTimer / 1.0, 1) * alpha;
+    ctx.globalAlpha = dripAlpha * 0.6;
+    const dripColor = isGoldStage ? '#c8a040' : info.color;
+    for (let d = 0; d < 5; d++) {
+      const dripX = textX + (d - 2) * 30 + Math.sin(d * 3.7 + gameTime) * 5;
+      const dripY = H / 2 + 10 + (2.0 - evolInkDripTimer) * 40 * (1 + d * 0.3);
+      const dripLen = 8 + d * 4;
+      ctx.fillStyle = dripColor;
+      ctx.beginPath();
+      ctx.ellipse(dripX, dripY, 2, dripLen, 0, 0, PI2);
+      ctx.fill();
+      // Drip tip (rounded blob)
+      ctx.beginPath();
+      ctx.arc(dripX, dripY + dripLen, 3, 0, PI2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // Particles around text (more for higher stages)
+  const particleCount = isGoldStage ? 6 : isChiStage ? 4 : 2;
   for (let p = 0; p < particleCount; p++) {
     if (Math.random() < 0.7) {
-      const fx = W / 2 + rand(-120, 120);
+      const fx = textX + rand(-120, 120);
       const fy = H / 2 - 15 + rand(-30, 30);
       ctx.save();
       ctx.globalAlpha = alpha * rand(0.3, 0.7);
@@ -3926,7 +4515,7 @@ function renderEvolutionOverlay() {
         ? `hsl(${rand(20, 50)},100%,${rand(50, 80)}%)`
         : `hsl(${rand(info.hue - 20, info.hue + 20)},80%,${rand(50, 80)}%)`;
       ctx.beginPath();
-      ctx.arc(fx, fy, rand(1.5, 5), 0, PI2);
+      ctx.arc(fx, fy, rand(1.5, isGoldStage ? 7 : 5), 0, PI2);
       ctx.fill();
       ctx.restore();
     }
@@ -3944,6 +4533,16 @@ function renderEvolutionOverlay() {
   ctx.fillStyle = `rgba(255,255,200,${alpha * 0.5})`;
   ctx.fillText(stageDescs[evolutionStage], W / 2, H / 2 + 60);
 
+  // Stage 4: "真龙现世" stays visible longer
+  if (isGoldStage && evolCeremonyTimer > 0) {
+    ctx.save();
+    ctx.globalAlpha = Math.min(evolCeremonyTimer / 1.0, 1) * 0.5;
+    ctx.fillStyle = '#ffd700';
+    ctx.font = 'bold 16px "Noto Serif SC"';
+    ctx.fillText('万灵臣服!', W / 2, H / 2 + 85);
+    ctx.restore();
+  }
+
   ctx.globalAlpha = 1;
 }
 
@@ -3957,6 +4556,71 @@ function renderDeathScreen() {
   ctx.fillStyle = deathVig;
   ctx.fillRect(0, 0, W, H);
 
+  const showEvolCard = maxEvolutionReached >= 3;
+  const info = getStageInfo(maxEvolutionReached || player.stageCache);
+
+  if (showEvolCard) {
+    // R3 WOW: Special "进化卡" evolution card
+    renderEvolutionCard(info);
+  } else {
+    // Standard death screen
+    renderStandardDeathCard(info);
+  }
+
+  // Buttons — always shown below card
+  const btnBaseY = showEvolCard ? 560 : 545;
+
+  // Retry
+  ctx.save();
+  const retryGrad = ctx.createLinearGradient(W / 2 - 80, btnBaseY, W / 2 + 80, btnBaseY + 50);
+  retryGrad.addColorStop(0, 'rgba(40,150,50,0.85)');
+  retryGrad.addColorStop(1, 'rgba(50,180,60,0.9)');
+  ctx.fillStyle = retryGrad;
+  ctx.shadowColor = 'rgba(80,200,80,0.3)';
+  ctx.shadowBlur = 10;
+  roundRect(ctx, W / 2 - 80, btnBaseY, 160, 50, 10, true);
+  ctx.strokeStyle = 'rgba(120,255,120,0.2)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, W / 2 - 80, btnBaseY, 160, 50, 10, false, true);
+  ctx.restore();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 20px "Noto Serif SC"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText('再来一次', W / 2, btnBaseY + 33);
+
+  // Home
+  ctx.save();
+  ctx.fillStyle = 'rgba(60,60,65,0.85)';
+  ctx.shadowColor = 'rgba(0,0,0,0.3)';
+  ctx.shadowBlur = 6;
+  roundRect(ctx, W / 2 - 80, btnBaseY + 70, 160, 40, 10, true);
+  ctx.strokeStyle = 'rgba(150,150,150,0.2)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, W / 2 - 80, btnBaseY + 70, 160, 40, 10, false, true);
+  ctx.restore();
+  ctx.fillStyle = '#ccc';
+  ctx.font = '16px "Noto Serif SC"';
+  ctx.fillText('返回主页', W / 2, btnBaseY + 97);
+
+  // Share
+  ctx.save();
+  const shareGrad = ctx.createLinearGradient(W / 2 - 80, btnBaseY + 130, W / 2 + 80, btnBaseY + 170);
+  shareGrad.addColorStop(0, 'rgba(40,90,180,0.85)');
+  shareGrad.addColorStop(1, 'rgba(50,110,210,0.9)');
+  ctx.fillStyle = shareGrad;
+  ctx.shadowColor = 'rgba(60,120,200,0.3)';
+  ctx.shadowBlur = 6;
+  roundRect(ctx, W / 2 - 80, btnBaseY + 130, 160, 40, 10, true);
+  ctx.strokeStyle = 'rgba(100,160,255,0.2)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, W / 2 - 80, btnBaseY + 130, 160, 40, 10, false, true);
+  ctx.restore();
+  ctx.fillStyle = '#fff';
+  ctx.fillText('分享战绩', W / 2, btnBaseY + 157);
+}
+
+function renderStandardDeathCard(info: { name: string; color: string; hue: number }) {
   // Parchment-style stat card with shadow
   ctx.save();
   ctx.shadowColor = 'rgba(0,0,0,0.5)';
@@ -3971,20 +4635,17 @@ function renderDeathScreen() {
   ctx.strokeStyle = 'rgba(180,150,80,0.3)';
   ctx.lineWidth = 1.5;
   roundRect(ctx, W / 2 - 150, 120, 300, 400, 16, false, true);
-  // Inner border
   ctx.strokeStyle = 'rgba(180,150,80,0.1)';
   ctx.lineWidth = 0.5;
   roundRect(ctx, W / 2 - 143, 127, 286, 386, 12, false, true);
   ctx.restore();
 
-  // Brand
   ctx.fillStyle = 'rgba(200,160,64,0.5)';
   ctx.font = '13px "Noto Serif SC"';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
   ctx.fillText('麦洛的冒险：吞灵化龙', W / 2, 155);
 
-  // Title with glow
   ctx.save();
   ctx.shadowColor = 'rgba(200,60,60,0.5)';
   ctx.shadowBlur = 15;
@@ -3993,7 +4654,6 @@ function renderDeathScreen() {
   ctx.fillText('魂归天地', W / 2, 205);
   ctx.restore();
 
-  // Decorative line
   ctx.strokeStyle = 'rgba(180,150,80,0.3)';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -4001,15 +4661,12 @@ function renderDeathScreen() {
   ctx.lineTo(W / 2 + 80, 220);
   ctx.stroke();
 
-  // Player name
   if (nameInputText) {
     ctx.fillStyle = 'rgba(200,180,100,0.8)';
     ctx.font = '16px "Noto Serif SC"';
     ctx.fillText(nameInputText, W / 2, 250);
   }
 
-  const info = getStageInfo(player.stageCache);
-  // Stats with proper spacing and typography
   const statsY = 285;
   const statsGap = 35;
   const statLabels = ['最终形态', '长度', '分数', '击杀', '最高分'];
@@ -4028,59 +4685,160 @@ function renderDeathScreen() {
     ctx.fillText(statValues[i], W / 2 + 80, sy);
   }
 
-  // Coins earned
   ctx.textAlign = 'center';
   ctx.fillStyle = '#fc0';
   ctx.font = 'bold 16px "Noto Serif SC"';
   ctx.fillText(`+${Math.floor(totalOrbsEaten / 10)} 金币`, W / 2, 485);
+}
 
-  // Buttons — card style with gradient
-  // Retry
-  ctx.save();
-  const retryGrad = ctx.createLinearGradient(W / 2 - 80, 545, W / 2 + 80, 595);
-  retryGrad.addColorStop(0, 'rgba(40,150,50,0.85)');
-  retryGrad.addColorStop(1, 'rgba(50,180,60,0.9)');
-  ctx.fillStyle = retryGrad;
-  ctx.shadowColor = 'rgba(80,200,80,0.3)';
-  ctx.shadowBlur = 10;
-  roundRect(ctx, W / 2 - 80, 545, 160, 50, 10, true);
-  ctx.strokeStyle = 'rgba(120,255,120,0.2)';
-  ctx.lineWidth = 1;
-  roundRect(ctx, W / 2 - 80, 545, 160, 50, 10, false, true);
-  ctx.restore();
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 20px "Noto Serif SC"';
-  ctx.fillText('再来一次', W / 2, 578);
+function renderEvolutionCard(info: { name: string; color: string; hue: number }) {
+  const cx = W / 2;
 
-  // Home
+  // Card with ink-wash border
   ctx.save();
-  ctx.fillStyle = 'rgba(60,60,65,0.85)';
-  ctx.shadowColor = 'rgba(0,0,0,0.3)';
-  ctx.shadowBlur = 6;
-  roundRect(ctx, W / 2 - 80, 615, 160, 40, 10, true);
-  ctx.strokeStyle = 'rgba(150,150,150,0.2)';
-  ctx.lineWidth = 1;
-  roundRect(ctx, W / 2 - 80, 615, 160, 40, 10, false, true);
-  ctx.restore();
-  ctx.fillStyle = '#ccc';
-  ctx.font = '16px "Noto Serif SC"';
-  ctx.fillText('返回主页', W / 2, 642);
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = 25;
+  ctx.shadowOffsetY = 5;
+  // Rich dark parchment background
+  const cardGrad = ctx.createLinearGradient(cx - 155, 80, cx + 155, 540);
+  cardGrad.addColorStop(0, 'rgba(25,20,15,0.95)');
+  cardGrad.addColorStop(0.3, 'rgba(35,28,20,0.97)');
+  cardGrad.addColorStop(0.7, 'rgba(30,25,18,0.97)');
+  cardGrad.addColorStop(1, 'rgba(20,16,12,0.95)');
+  ctx.fillStyle = cardGrad;
+  roundRect(ctx, cx - 155, 80, 310, 460, 12, true);
 
-  // Share
-  ctx.save();
-  const shareGrad = ctx.createLinearGradient(W / 2 - 80, 675, W / 2 + 80, 715);
-  shareGrad.addColorStop(0, 'rgba(40,90,180,0.85)');
-  shareGrad.addColorStop(1, 'rgba(50,110,210,0.9)');
-  ctx.fillStyle = shareGrad;
-  ctx.shadowColor = 'rgba(60,120,200,0.3)';
-  ctx.shadowBlur = 6;
-  roundRect(ctx, W / 2 - 80, 675, 160, 40, 10, true);
-  ctx.strokeStyle = 'rgba(100,160,255,0.2)';
+  // Ink-wash border (double line with brush stroke feel)
+  ctx.strokeStyle = 'rgba(120,100,60,0.5)';
+  ctx.lineWidth = 3;
+  roundRect(ctx, cx - 155, 80, 310, 460, 12, false, true);
+  ctx.strokeStyle = 'rgba(180,150,80,0.2)';
   ctx.lineWidth = 1;
-  roundRect(ctx, W / 2 - 80, 675, 160, 40, 10, false, true);
+  roundRect(ctx, cx - 148, 87, 296, 446, 8, false, true);
+  // Inner decorative corners
+  ctx.strokeStyle = 'rgba(200,160,60,0.3)';
+  ctx.lineWidth = 2;
+  // Top-left corner
+  ctx.beginPath();
+  ctx.moveTo(cx - 140, 100); ctx.lineTo(cx - 140, 95); ctx.lineTo(cx - 125, 95);
+  ctx.stroke();
+  // Top-right corner
+  ctx.beginPath();
+  ctx.moveTo(cx + 125, 95); ctx.lineTo(cx + 140, 95); ctx.lineTo(cx + 140, 100);
+  ctx.stroke();
+  // Bottom-left corner
+  ctx.beginPath();
+  ctx.moveTo(cx - 140, 530); ctx.lineTo(cx - 140, 535); ctx.lineTo(cx - 125, 535);
+  ctx.stroke();
+  // Bottom-right corner
+  ctx.beginPath();
+  ctx.moveTo(cx + 125, 535); ctx.lineTo(cx + 140, 535); ctx.lineTo(cx + 140, 530);
+  ctx.stroke();
   ctx.restore();
-  ctx.fillStyle = '#fff';
-  ctx.fillText('分享战绩', W / 2, 702);
+
+  // "进化卡" header
+  ctx.fillStyle = 'rgba(200,160,64,0.6)';
+  ctx.font = '12px "Noto Serif SC"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText('进化卡 · 吞灵化龙', cx, 110);
+
+  // Player name
+  if (nameInputText) {
+    ctx.fillStyle = 'rgba(200,180,100,0.9)';
+    ctx.font = '15px "Noto Serif SC"';
+    ctx.fillText(nameInputText, cx, 135);
+  }
+
+  // Decorative divider
+  ctx.strokeStyle = 'rgba(200,160,60,0.3)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx - 100, 145);
+  ctx.lineTo(cx + 100, 145);
+  ctx.stroke();
+
+  // Evolution form — big and prominent
+  ctx.save();
+  ctx.shadowColor = info.color;
+  ctx.shadowBlur = 20;
+  ctx.fillStyle = info.color;
+  ctx.font = 'bold 42px "Noto Serif SC"';
+  ctx.fillText(info.name, cx, 205);
+  ctx.restore();
+
+  // "最高进化" label
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = '14px "Noto Serif SC"';
+  ctx.fillText(`最高进化: ${info.name}`, cx, 235);
+
+  // Dragon silhouette (simplified artistic representation)
+  ctx.save();
+  ctx.globalAlpha = 0.08;
+  ctx.fillStyle = info.color;
+  // Simple serpentine shape
+  ctx.beginPath();
+  for (let i = 0; i < 40; i++) {
+    const t2 = i / 40;
+    const sx = cx - 80 + t2 * 160;
+    const sy = 270 + Math.sin(t2 * Math.PI * 3) * 20;
+    const sr = 8 - t2 * 6;
+    ctx.moveTo(sx + sr, sy);
+    ctx.arc(sx, sy, Math.max(sr, 1), 0, PI2);
+  }
+  ctx.fill();
+  ctx.restore();
+
+  // Decorative divider
+  ctx.strokeStyle = 'rgba(200,160,60,0.2)';
+  ctx.beginPath();
+  ctx.moveTo(cx - 80, 300);
+  ctx.lineTo(cx + 80, 300);
+  ctx.stroke();
+
+  // Stats grid
+  const statsData = [
+    { label: '击杀数', value: `${player.kills}`, color: '#f88' },
+    { label: '灵珠', value: `${totalOrbsThisRun}`, color: '#8f8' },
+    { label: '存活', value: `${Math.floor(timeAliveThisRun)}秒`, color: '#88f' },
+    { label: '分数', value: `${player.score}`, color: '#fc0' },
+    { label: '最高分', value: `${highScore}`, color: '#ffd700' },
+  ];
+
+  let statY = 325;
+  for (const stat of statsData) {
+    ctx.fillStyle = 'rgba(180,170,150,0.4)';
+    ctx.font = '13px "Noto Serif SC"';
+    ctx.textAlign = 'left';
+    ctx.fillText(stat.label, cx - 80, statY);
+    ctx.fillStyle = stat.color;
+    ctx.font = 'bold 15px "Noto Serif SC"';
+    ctx.textAlign = 'right';
+    ctx.fillText(stat.value, cx + 80, statY);
+    statY += 30;
+  }
+
+  // Red seal stamp (印章)
+  ctx.save();
+  ctx.translate(cx + 90, 480);
+  ctx.rotate(-0.15);
+  // Stamp background
+  ctx.strokeStyle = 'rgba(200,40,40,0.7)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-22, -22, 44, 44);
+  // Stamp text
+  ctx.fillStyle = 'rgba(200,40,40,0.6)';
+  ctx.font = 'bold 18px "Noto Serif SC"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(maxEvolutionReached >= 4 ? '龙' : '螭', 0, 0);
+  ctx.restore();
+
+  // Coins earned
+  ctx.fillStyle = '#fc0';
+  ctx.font = 'bold 14px "Noto Serif SC"';
+  ctx.textAlign = 'center';
+  ctx.fillText(`+${Math.floor(totalOrbsEaten / 10)} 金币`, cx, 530);
 }
 
 function renderTitle() {
@@ -4333,6 +5091,18 @@ function renderTitle() {
   ctx.fillStyle = 'rgba(200,160,64,1)';
   ctx.font = '12px "Noto Serif SC"';
   ctx.fillText('麦洛的冒险 · 第四章', W / 2, H - 20);
+  ctx.restore();
+
+  // Fix #14: Mute button on title screen (top-right)
+  ctx.save();
+  ctx.globalAlpha = 0.5;
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  roundRect(ctx, W - 46, 6, 40, 40, 8, true);
+  ctx.fillStyle = audioMuted ? '#f66' : '#ddd';
+  ctx.font = '16px "Noto Serif SC"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(audioMuted ? '静' : '音', W - 26, 26);
   ctx.restore();
 }
 
@@ -4633,8 +5403,6 @@ function gameLoop(timestamp: number) {
 
 // ─── Init ───────────────────────────────────────────────────
 loadData();
-dailySeed = new Date().getDate() * 1000 + new Date().getMonth();
-
 // Show name input on first launch
 if (!nameInputText) {
   const passport = getPassport();
@@ -4642,7 +5410,6 @@ if (!nameInputText) {
     nameInputText = passport.playerName;
   } else {
     gameScreen = 'nameInput';
-    nameInputActive = true;
   }
 }
 

@@ -62,7 +62,7 @@ function shuffle<T>(arr: T[]): T[] {
 // TYPES
 // ============================================================================
 
-type GameScreen = 'title' | 'charSelect' | 'playing' | 'upgrade' | 'death' | 'victory' | 'shop' | 'leaderboard' | 'daily' | 'nameInput';
+type GameScreen = 'title' | 'charSelect' | 'playing' | 'upgrade' | 'death' | 'victory' | 'shop' | 'leaderboard' | 'daily' | 'nameInput' | 'bestiary';
 
 type BrickType = 'normal' | 'tough' | 'gold' | 'explosive' | 'spirit' | 'boss';
 
@@ -285,7 +285,7 @@ const SHOP_ITEMS: ShopItem[] = [
 ];
 
 // --- Name presets ---
-const NAME_PRESETS = ['旅行者', '山海客', '破阵人', '墨侠', '逐风者'];
+const NAME_PRESETS = ['麦洛', '山海客', '逐风者', '墨侠', '破阵手', '弹珠师', '石匠', '旅行者'];
 
 // ============================================================================
 // GAME STATE
@@ -368,9 +368,6 @@ let cascadeChainDisplayTimer = 0;
 let slowMoTimer = 0;
 let slowMoFactor = 1;
 
-// --- Perfect clear tracking ---
-let waveLivesLost = false;
-
 let frameCount = 0;
 let lastTime = 0;
 let dt = 1 / 60;
@@ -402,11 +399,50 @@ let nameInputText = '';
 let nameInputCursor = false;
 let nameInputCursorTimer = 0;
 
+// --- Sticky paddle hit counter ---
+let stickyPaddleHits = 0;
+
+// --- Pause state ---
+let gamePaused = false;
+let unpauseBlendFrames = 0; // frames remaining for smooth paddle interpolation after unpause
+let prePauseInputX = W / 2; // last inputX before pause
+
+function togglePause(): void {
+  if (gamePaused) {
+    // Unpausing: start smooth blend from saved paddle position
+    gamePaused = false;
+    unpauseBlendFrames = 10;
+    prePauseInputX = paddleX;
+  } else {
+    // Pausing: save current paddleX
+    gamePaused = true;
+    prePauseInputX = paddleX;
+  }
+}
+
+// --- Mute state ---
+let audioMuted = false;
+
 // --- Input ---
 let inputX = W / 2;
 let inputActive = false;
 let clickX = 0, clickY = 0, clicked = false;
 let keysDown: Record<string, boolean> = {};
+
+// --- Bestiary: total bricks destroyed per type ---
+interface BestiaryStats {
+  normal: number;
+  tough: number;
+  gold: number;
+  explosive: number;
+  boss: number;
+}
+let bestiaryStats: BestiaryStats = { normal: 0, tough: 0, gold: 0, explosive: 0, boss: 0 };
+
+// --- Tutorial hint system ---
+let isFirstRun = true;
+let tutorialHintText = '';
+let tutorialHintTimer = 0;
 
 // --- Pre-rendered texture caches ---
 let paperTextureCanvas: HTMLCanvasElement | null = null;
@@ -433,6 +469,7 @@ function saveData(): void {
     localStorage.setItem('mq3_weekly_best', String(weeklyBest));
     localStorage.setItem('mq3_weekly_week', weeklyBestWeek);
     localStorage.setItem('melos_passport', JSON.stringify(passport));
+    localStorage.setItem('mq3_bestiary', JSON.stringify(bestiaryStats));
   } catch (_) { /* storage full */ }
 }
 
@@ -451,6 +488,25 @@ function loadData(): void {
       weeklyBest = 0;
     }
     weeklyBestWeek = currentWeek;
+
+    // Mute state
+    audioMuted = localStorage.getItem('mq3_muted') === '1';
+
+    // Bestiary stats
+    const bestiaryStr = localStorage.getItem('mq3_bestiary');
+    if (bestiaryStr) {
+      const b = JSON.parse(bestiaryStr);
+      bestiaryStats = {
+        normal: b.normal || 0,
+        tough: b.tough || 0,
+        gold: b.gold || 0,
+        explosive: b.explosive || 0,
+        boss: b.boss || 0,
+      };
+    }
+
+    // Tutorial first run
+    isFirstRun = localStorage.getItem('melos3_firstRun') !== 'false';
 
     // Passport
     const passportStr = localStorage.getItem('melos_passport');
@@ -507,7 +563,7 @@ function ensureAudio(): AudioContext {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
   }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (audioCtx.state === 'suspended' && !audioMuted) audioCtx.resume();
   return audioCtx;
 }
 
@@ -1037,6 +1093,7 @@ function startBGM(): void {
         gain.gain.linearRampToValueAtTime(0, t + 0.6);
         osc.start(t); osc.stop(t + 0.6);
         bgmNodes.push(osc);
+        osc.onended = () => { const idx = bgmNodes.indexOf(osc); if (idx >= 0) bgmNodes.splice(idx, 1); };
         erhuIndex++;
       } catch (_) { /* */ }
       bgmTimers.push(window.setTimeout(playErhuNote, 600));
@@ -1073,6 +1130,7 @@ function startBGM(): void {
           gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
           osc.start(t); osc.stop(t + 0.4);
           bgmNodes.push(osc);
+          osc.onended = () => { const idx = bgmNodes.indexOf(osc); if (idx >= 0) bgmNodes.splice(idx, 1); };
         } catch (_) { /* */ }
       }
       const interval = 800 + Math.random() * 1200;
@@ -1097,6 +1155,7 @@ function startBGM(): void {
           gain.gain.linearRampToValueAtTime(0, t + 0.15);
           osc.start(t); osc.stop(t + 0.15);
           bgmNodes.push(osc);
+          osc.onended = () => { const idx = bgmNodes.indexOf(osc); if (idx >= 0) bgmNodes.splice(idx, 1); };
         } catch (_) { /* */ }
       }
       bgmTimers.push(window.setTimeout(playDrumKick, 800));
@@ -1566,7 +1625,13 @@ function addLightningBolt(x1: number, y1: number, x2: number, y2: number): void 
   lightningBolts.push({ x1, y1, x2, y2, life: 15, maxLife: 15 });
 }
 
+const MAX_PARTICLES = 400;
+
 function updateParticles(): void {
+  // Hard cap: bulk remove oldest particles when over limit (O(1) splice vs O(n) per shift)
+  if (particles.length > MAX_PARTICLES) {
+    particles.splice(0, particles.length - MAX_PARTICLES);
+  }
   for (let i = particles.length - 1; i >= 0; i--) {
     const p = particles[i];
     p.x += p.vx;
@@ -2137,7 +2202,9 @@ function generateWave(waveNum: number): void {
 // --- Chain explosion tracking ---
 let chainSize = 0;
 
-function damageBrick(brick: Brick, dmg: number, ball: Ball): void {
+function damageBrick(brick: Brick, dmg: number, ball: Ball, _depth: number = 0): void {
+  // Guard against recursive stack overflow from explosive chains
+  if (_depth > 3) return;
   const isCrit = Math.random() < getCritChance();
   // Fury mode: +1 damage
   const furyBonus = furyActive ? 1 : 0;
@@ -2170,10 +2237,17 @@ function damageBrick(brick: Brick, dmg: number, ball: Ball): void {
 
   combo++;
   if (combo > maxCombo) maxCombo = combo;
-  comboTimer = 120;
+  // Scale combo timer inversely with ball speed bonus so fast balls don't keep infinite combos
+  comboTimer = Math.max(60, Math.floor(120 - ball.comboSpeedBonus * 200));
   comboDisplayTimer = 60;
   if (combo > 5) comboPulseTimer = 20;
   score += 10 * combo * (isCrit ? 3 : 1);
+
+  // Tutorial hint: wave 2 combo > 3
+  if (isFirstRun && wave === 2 && combo === 4 && tutorialHintTimer <= 0) {
+    tutorialHintText = '连击越高 \u2192 奖励越大!';
+    tutorialHintTimer = 150;
+  }
 
   // Combo milestones: 5, 10, 15, 20
   if (combo === 5 || combo === 10 || combo === 15 || combo === 20) {
@@ -2217,9 +2291,11 @@ function damageBrick(brick: Brick, dmg: number, ball: Ball): void {
     spawnInkSplash(brick.x + brick.w / 2, brick.y + brick.h / 2);
   }
 
-  // Wukong check: 3% chance when combo reaches 20+
-  if (combo >= 20 && !wukongActive && !wukongTriggered && Math.random() < 0.03) {
-    triggerWukong();
+  // Wukong check: 8% chance when combo reaches 15+, guaranteed on first combo-20 per wave
+  if (combo >= 15 && !wukongActive && !wukongTriggered) {
+    if (combo >= 20 || Math.random() < 0.08) {
+      triggerWukong();
+    }
   }
 
   // Achievement: 15 combo
@@ -2227,6 +2303,10 @@ function damageBrick(brick: Brick, dmg: number, ball: Ball): void {
 
   if (brick.hp <= 0) {
     brick.alive = false;
+    // Track bestiary stats
+    if (brick.type !== 'spirit' && brick.type in bestiaryStats) {
+      bestiaryStats[brick.type as keyof BestiaryStats]++;
+    }
     playBrickDestroyCrunch(brick.type);
 
     // Enhanced brick break particles - more for boss
@@ -2293,21 +2373,13 @@ function damageBrick(brick: Brick, dmg: number, ball: Ball): void {
         screenEdgeFlashColor = '#ff4400';
       }
 
-      // Chain 8+: all remaining bricks take 1 damage
+      // Chain 8+: all remaining bricks take 1 damage via damageBrick for proper chains/coins/combo
       if (cascadeChainCount >= 8) {
         spawnFloatingText(W / 2, H / 2, '天崩地裂!', '#ff0000', 40, true);
         shakeMag = Math.max(shakeMag, 30);
-        for (const b of bricks) {
-          if (b.alive && b !== brick) {
-            b.hp -= 1;
-            b.flashTimer = 6;
-            b.wobble = 10;
-            b.crackLevel = Math.max(0, 1 - b.hp / b.maxHp);
-            if (b.hp <= 0) {
-              b.alive = false;
-              spawnBrickBreak(b.x + b.w / 2, b.y + b.h / 2, b.type);
-            }
-          }
+        const bricksToHit = bricks.filter(b => b.alive && b !== brick);
+        for (const b of bricksToHit) {
+          damageBrick(b, 1, ball, _depth + 1);
         }
       }
 
@@ -2319,7 +2391,7 @@ function damageBrick(brick: Brick, dmg: number, ball: Ball): void {
           const dist = Math.hypot(bdx, bdy);
           if (dist < cascadeRadius) {
             addLightningBolt(bx, by, b.x + b.w / 2, b.y + b.h / 2);
-            damageBrick(b, 2, ball);
+            damageBrick(b, 2, ball, _depth + 1);
           }
         }
       }
@@ -2345,7 +2417,7 @@ function damageBrick(brick: Brick, dmg: number, ball: Ball): void {
       for (let i = 0; i < Math.min(thunderChainCount, nearby.length); i++) {
         const target = nearby[i];
         addLightningBolt(bx, by, target.x + target.w / 2, target.y + target.h / 2);
-        damageBrick(target, 1, ball);
+        damageBrick(target, 1, ball, _depth + 1);
         spawnInkSplat(target.x + target.w / 2, target.y + target.h / 2, 4, '#4488ff');
       }
     }
@@ -2358,7 +2430,7 @@ function damageBrick(brick: Brick, dmg: number, ball: Ball): void {
         if (b.alive && b !== brick) {
           const dist = Math.hypot(b.x + b.w / 2 - bx, b.y + b.h / 2 - by);
           if (dist < bombRadius) {
-            damageBrick(b, 1, ball);
+            damageBrick(b, 1, ball, _depth + 1);
           }
         }
       }
@@ -2428,14 +2500,20 @@ function checkBallBrickCollision(ball: Ball): boolean {
       damageBrick(brick, 1, ball);
 
       if (!ball.fire && !ball.piercing) {
-        const overlapX = ball.radius - Math.abs(distX);
-        const overlapY = ball.radius - Math.abs(distY);
-        if (overlapX < overlapY) {
+        if (distX === 0 && distY === 0) {
+          // Exact corner hit: reverse both axes
           ball.vx = -ball.vx;
-          ball.x += distX > 0 ? overlapX : -overlapX;
-        } else {
           ball.vy = -ball.vy;
-          ball.y += distY > 0 ? overlapY : -overlapY;
+        } else {
+          const overlapX = ball.radius - Math.abs(distX);
+          const overlapY = ball.radius - Math.abs(distY);
+          if (overlapX < overlapY) {
+            ball.vx = -ball.vx;
+            ball.x += distX > 0 ? overlapX : -overlapX;
+          } else {
+            ball.vy = -ball.vy;
+            ball.y += distY > 0 ? overlapY : -overlapY;
+          }
         }
       }
 
@@ -2544,7 +2622,14 @@ function updateBalls(): void {
         ball.vy = -Math.cos(angle) * speed;
         ball.y = PADDLE_Y - BASE_PADDLE_H / 2 - ball.radius;
         playPaddlePong(hitPos);
-        stickyMode = true;
+        // Sticky activates every 3rd paddle hit (not every hit)
+        if (getUpgradeStacks('sticky') > 0) {
+          stickyPaddleHits++;
+          if (stickyPaddleHits >= 3) {
+            stickyMode = true;
+            stickyPaddleHits = 0;
+          }
+        }
 
         // Near miss detection: ball was very close to falling off
         if (ball.y > PADDLE_Y - BASE_PADDLE_H && (Math.abs(ball.x - paddleX) > pw / 2 * 0.8)) {
@@ -2643,7 +2728,6 @@ function updateBalls(): void {
 
   if (balls.length === 0 && launched) {
     lives--;
-    waveLivesLost = true;
     shakeMag = 6;
     if (lives <= 0) {
       playDeath();
@@ -2655,6 +2739,9 @@ function updateBalls(): void {
 }
 
 function updateBricks(): void {
+  // Guard: if endRun was called (e.g. by updateBalls), stop processing
+  if (gameScreen !== 'playing') return;
+
   // Find nearest ball for fear calculation
   let nearestBallX = W / 2, nearestBallY = H / 2;
   let minBallDist = 9999;
@@ -2704,8 +2791,10 @@ function updateBricks(): void {
         brick.regenTimer = 300;
         brick.hp = Math.min(brick.hp + 1, brick.maxHp);
         brick.crackLevel = Math.max(0, 1 - brick.hp / brick.maxHp);
-        // Green pulse visual
-        spawnInkSplat(brick.x + brick.w / 2, brick.y + brick.h / 2, 3, '#44ff44');
+        // Bright green pulse visual + floating "+1" text
+        spawnInkSplat(brick.x + brick.w / 2, brick.y + brick.h / 2, 5, '#22ff66');
+        spawnFloatingText(brick.x + brick.w / 2, brick.y - 5, '+1', '#44ff44', 14, true);
+        brick.flashTimer = 8;
       }
     }
 
@@ -2914,7 +3003,8 @@ function startRun(charDef: CharDef, daily = false): void {
   cascadeChainDisplayTimer = 0;
   slowMoTimer = 0;
   slowMoFactor = 1;
-  waveLivesLost = false;
+  stickyPaddleHits = 0;
+  gamePaused = false;
 
   lives = charDef.lives + (shopLevels['shop_life'] || 0);
   waveLivesStart = lives;
@@ -2935,6 +3025,12 @@ function startRun(charDef: CharDef, daily = false): void {
   launched = false;
   gameScreen = 'playing';
   startBGM();
+
+  // Tutorial hint for wave 1 on first run
+  if (isFirstRun && wave === 1) {
+    tutorialHintText = '\u2190 滑动/鼠标控制挡板 \u2192';
+    tutorialHintTimer = 180;
+  }
 }
 
 function endRun(victory: boolean): void {
@@ -2975,6 +3071,7 @@ function endRun(victory: boolean): void {
 function nextWave(): void {
   waveLivesStart = lives;
   wukongTriggered = false; // allow Wukong again next wave
+  furyTriggeredCombo = 0; // allow Fury to trigger again next wave
   cascadeChainCount = 0;
   wave++;
   generateWave(wave);
@@ -2988,6 +3085,20 @@ function nextWave(): void {
   waveTransitionText = waveName;
   waveTransitionSubText = `第${wave}波`;
   gameScreen = 'playing';
+
+  // Tutorial hints for first run
+  if (isFirstRun) {
+    if (wave === 2) {
+      // Wave 2 hint will be triggered by combo > 3 (see combo increment code)
+    } else if (wave === 3) {
+      tutorialHintText = '\ud83d\udc41 砖块会看着球！';
+      tutorialHintTimer = 180;
+    } else if (wave === 4) {
+      // After wave 3 completes, disable tutorial
+      isFirstRun = false;
+      try { localStorage.setItem('melos3_firstRun', 'false'); } catch (_) { /* */ }
+    }
+  }
 }
 
 // ============================================================================
@@ -3941,18 +4052,21 @@ function renderTitle(): void {
   }
 
   // Buttons
-  const btnW = 200, btnH = 46, startBtnX = W / 2 - btnW / 2;
-  if (drawButton(startBtnX, 470, btnW, btnH, '开始冒险', '#3a2a1a')) {
+  const btnW = 200, btnH = 42, startBtnX = W / 2 - btnW / 2;
+  if (drawButton(startBtnX, 465, btnW, btnH, '开始冒险', '#3a2a1a')) {
     gameScreen = 'charSelect';
   }
-  if (drawButton(startBtnX, 530, btnW, btnH, '每日挑战', '#2a3a2a')) {
+  if (drawButton(startBtnX, 517, btnW, btnH, '每日挑战', '#2a3a2a')) {
     isDailyRun = true;
     gameScreen = 'charSelect';
   }
-  if (drawButton(startBtnX, 590, btnW, btnH, '商店', '#2a2a3a')) {
+  if (drawButton(startBtnX, 569, btnW, btnH, '山灵图鉴', '#2a3a3a')) {
+    gameScreen = 'bestiary';
+  }
+  if (drawButton(startBtnX, 621, btnW, btnH, '商店', '#2a2a3a')) {
     gameScreen = 'shop';
   }
-  if (drawButton(startBtnX, 650, btnW, btnH, '排行榜', '#3a2a2a')) {
+  if (drawButton(startBtnX, 673, btnW, btnH, '排行榜', '#3a2a2a')) {
     gameScreen = 'leaderboard';
   }
 
@@ -3962,19 +4076,19 @@ function renderTitle(): void {
   ctx.shadowColor = '#ffd700';
   ctx.shadowBlur = 4;
   ctx.beginPath();
-  ctx.arc(W / 2 - 88, 720, 5, 0, Math.PI * 2);
+  ctx.arc(W / 2 - 88, 740, 5, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
   ctx.restore();
-  drawInkText(`${coins}`, W / 2 - 60, 720, 14, '#8b7530');
+  drawInkText(`${coins}`, W / 2 - 60, 740, 14, '#8b7530');
   if (weeklyBest > 0) {
-    drawInkText(`周最佳: ${weeklyBest}`, W / 2 + 60, 720, 14, '#5a7a3a');
+    drawInkText(`周最佳: ${weeklyBest}`, W / 2 + 60, 740, 14, '#5a7a3a');
   }
 
   // Achievements earned
   const earnedCount = passport.achievements.length;
   if (earnedCount > 0) {
-    drawInkText(`印章: ${earnedCount}/${ACHIEVEMENTS.length}`, W / 2, 745, 12, '#888');
+    drawInkText(`印章: ${earnedCount}/${ACHIEVEMENTS.length}`, W / 2, 765, 12, '#888');
   }
 
   // Bottom brand: atmospheric watermark
@@ -3984,9 +4098,323 @@ function renderTitle(): void {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#8a7a6a';
-  ctx.fillText('麦洛的冒险 · 第三章', W / 2, 790);
+  ctx.fillText('麦洛的冒险 · 第三章', W / 2, 800);
   ctx.restore();
-  drawInkText('v0.3.0', W / 2, 810, 10, '#888');
+  drawInkText('v0.3.0', W / 2, 818, 10, '#888');
+
+  // Mute button on title screen
+  if (drawButton(W - 50, 10, 40, 28, audioMuted ? '🔇' : '🔊', '#3a3a2a')) {
+    toggleMute();
+  }
+}
+
+// ============================================================================
+// BESTIARY SCREEN (山灵图鉴)
+// ============================================================================
+
+interface BestiaryEntry {
+  type: BrickType;
+  name: string;
+  hp: string;
+  desc: string;
+}
+
+const BESTIARY_ENTRIES: BestiaryEntry[] = [
+  { type: 'normal', name: '石灵', hp: '1', desc: '最基础的山灵，温和而好奇' },
+  { type: 'tough', name: '岩甲兽', hp: '2-5', desc: '坚硬外壳，需多次击打' },
+  { type: 'gold', name: '金蟾', hp: '1', desc: '贪财好利，击碎掉落金币' },
+  { type: 'explosive', name: '火精', hp: '1', desc: '暴躁易怒，爆炸波及周围' },
+  { type: 'boss', name: '镇山魔', hp: '10+', desc: '每五层守关，力量惊人' },
+];
+
+function renderBestiary(): void {
+  drawPaperBg();
+
+  // Title
+  ctx.save();
+  ctx.shadowColor = '#ffd700';
+  ctx.shadowBlur = 10;
+  drawInkText('山灵图鉴', W / 2, 55, 28, '#1a1a2e', 'center', true);
+  ctx.shadowBlur = 0;
+  ctx.restore();
+  drawInkText('记录旅途中遇见的山灵', W / 2, 85, 13, '#7a6a5a');
+
+  // Total destroyed
+  const totalDestroyed = bestiaryStats.normal + bestiaryStats.tough + bestiaryStats.gold + bestiaryStats.explosive + bestiaryStats.boss;
+  drawInkText(`已击碎: ${totalDestroyed}`, W / 2, 110, 14, '#8b7530');
+
+  // Grid of brick types: 2 columns for first 4, last one centered
+  const cardW = 170, cardH = 120, gap = 12;
+  const startY = 135;
+
+  BESTIARY_ENTRIES.forEach((entry, i) => {
+    const col = i < 4 ? (i % 2) : 0;
+    const row = i < 4 ? Math.floor(i / 2) : 2;
+    const cx = i < 4
+      ? (W / 2 - cardW - gap / 2) + col * (cardW + gap) + cardW / 2
+      : W / 2;
+    const cy = startY + row * (cardH + gap) + cardH / 2;
+    const x = cx - cardW / 2;
+    const y = cy - cardH / 2;
+
+    // Card background
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.3)';
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetY = 2;
+    ctx.fillStyle = 'rgba(30,25,20,0.85)';
+    ctx.beginPath();
+    roundRect(x, y, cardW, cardH, 6);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(200,180,140,0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    roundRect(x, y, cardW, cardH, 6);
+    ctx.stroke();
+    ctx.restore();
+
+    // 3x scale animated brick preview
+    ctx.save();
+    const brickPreviewX = x + 28;
+    const brickPreviewY = y + 28;
+    const brickScale = 2.5;
+    const bw = 38, bh = 18;
+
+    ctx.translate(brickPreviewX, brickPreviewY);
+    ctx.scale(brickScale, brickScale);
+
+    // Breathing animation
+    const breathPhase = frameCount * 0.04 + i * 1.5;
+    const breathScale = 0.95 + 0.10 * (0.5 + 0.5 * Math.sin(breathPhase));
+    ctx.scale(breathScale, breathScale);
+
+    // Type-specific glow
+    if (entry.type === 'explosive') {
+      const pulse = 0.5 + 0.5 * Math.sin(frameCount * 0.15 + breathPhase);
+      ctx.shadowColor = `rgba(255,${Math.floor(60 + pulse * 40)},0,1)`;
+      ctx.shadowBlur = 8 + pulse * 6;
+    } else if (entry.type === 'gold') {
+      const pulse = 0.5 + 0.5 * Math.sin(frameCount * 0.1 + breathPhase);
+      ctx.shadowColor = `rgba(255,215,0,${0.4 + pulse * 0.3})`;
+      ctx.shadowBlur = 6 + pulse * 8;
+    } else if (entry.type === 'boss') {
+      const pulse = 0.5 + 0.5 * Math.sin(frameCount * 0.08);
+      ctx.shadowColor = `rgba(140,30,80,${0.5 + pulse * 0.3})`;
+      ctx.shadowBlur = 10 + pulse * 8;
+    } else if (entry.type === 'tough') {
+      ctx.shadowColor = 'rgba(100,80,40,0.3)';
+      ctx.shadowBlur = 4;
+    }
+
+    // Brick body gradient
+    const bodyGrad = ctx.createLinearGradient(0, 0, 0, bh);
+    switch (entry.type) {
+      case 'normal':
+        bodyGrad.addColorStop(0, '#40404f');
+        bodyGrad.addColorStop(0.45, '#2a2a3a');
+        bodyGrad.addColorStop(1, '#1a1a28');
+        break;
+      case 'tough':
+        bodyGrad.addColorStop(0, '#6b5838');
+        bodyGrad.addColorStop(0.4, '#4a3828');
+        bodyGrad.addColorStop(1, '#2a1808');
+        break;
+      case 'gold':
+        bodyGrad.addColorStop(0, '#ffe066');
+        bodyGrad.addColorStop(0.4, '#d4a020');
+        bodyGrad.addColorStop(1, '#8b6510');
+        break;
+      case 'explosive':
+        bodyGrad.addColorStop(0, '#cc3020');
+        bodyGrad.addColorStop(0.5, '#8b1818');
+        bodyGrad.addColorStop(1, '#4a0808');
+        break;
+      case 'boss':
+        bodyGrad.addColorStop(0, '#3a1030');
+        bodyGrad.addColorStop(0.4, '#2a0820');
+        bodyGrad.addColorStop(1, '#150410');
+        break;
+    }
+    ctx.fillStyle = bodyGrad;
+    ctx.beginPath();
+    roundRect(-bw / 2, -bh / 2, bw, bh, 4);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = 'transparent';
+
+    // Ink border
+    ctx.strokeStyle = entry.type === 'boss' ? '#4a0828' : '#1a1a1a';
+    ctx.lineWidth = entry.type === 'boss' ? 2 : 1.5;
+    ctx.beginPath();
+    roundRect(-bw / 2, -bh / 2, bw, bh, 4);
+    ctx.stroke();
+
+    // Animated eyes that watch the "viewer" (oscillate)
+    const eyeSpacing = entry.type === 'boss' ? bw * 0.25 : bw * 0.18;
+    const eyeY = entry.type === 'boss' ? -2 : -1;
+    const leftEyeX = -eyeSpacing;
+    const rightEyeX = eyeSpacing;
+    const viewerLookX = Math.sin(frameCount * 0.03 + i) * 1.5;
+    const viewerLookY = Math.cos(frameCount * 0.02 + i * 0.7) * 0.8;
+
+    // Blinking
+    const blinkPhase = (frameCount + i * 70) % 180;
+    const isBlinking = blinkPhase < 5;
+
+    if (isBlinking) {
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(leftEyeX - 1.5, eyeY);
+      ctx.lineTo(leftEyeX + 1.5, eyeY);
+      ctx.moveTo(rightEyeX - 1.5, eyeY);
+      ctx.lineTo(rightEyeX + 1.5, eyeY);
+      ctx.stroke();
+    } else {
+      const baseSize = entry.type === 'boss' ? 2.5 : 1.8;
+      let eyeColor = '#ffffff';
+      if (entry.type === 'gold') eyeColor = '#ffd700';
+      if (entry.type === 'explosive') eyeColor = '#ff4444';
+      if (entry.type === 'boss') eyeColor = '#ff2244';
+
+      ctx.fillStyle = eyeColor;
+      ctx.beginPath();
+      ctx.arc(leftEyeX, eyeY, baseSize, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(rightEyeX, eyeY, baseSize, 0, Math.PI * 2);
+      ctx.fill();
+
+      const pupilSize = baseSize * 0.5;
+      ctx.fillStyle = entry.type === 'boss' ? '#440000' : '#1a1a2e';
+      ctx.beginPath();
+      ctx.arc(leftEyeX + viewerLookX, eyeY + viewerLookY, pupilSize, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(rightEyeX + viewerLookX, eyeY + viewerLookY, pupilSize, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Special expressions
+      if (entry.type === 'gold') {
+        // Winking: one eye closes periodically
+        const winkPhase = (frameCount + i * 50) % 240;
+        if (winkPhase > 200 && winkPhase < 220) {
+          ctx.fillStyle = bodyGrad;
+          ctx.beginPath();
+          ctx.arc(rightEyeX, eyeY, baseSize + 0.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#ffd700';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(rightEyeX - 1.5, eyeY);
+          ctx.lineTo(rightEyeX + 1.5, eyeY);
+          ctx.stroke();
+        }
+        // Grin
+        ctx.strokeStyle = '#ffd700';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(0, eyeY + 4, 3, 0, Math.PI);
+        ctx.stroke();
+      }
+      if (entry.type === 'explosive') {
+        // Angry eyebrows
+        ctx.strokeStyle = '#ff2200';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(leftEyeX - 3, eyeY - 3);
+        ctx.lineTo(leftEyeX + 1, eyeY - 4);
+        ctx.moveTo(rightEyeX + 3, eyeY - 3);
+        ctx.lineTo(rightEyeX - 1, eyeY - 4);
+        ctx.stroke();
+      }
+      if (entry.type === 'boss') {
+        // Demon eyebrows
+        ctx.strokeStyle = '#ff2244';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(leftEyeX - 4, eyeY - 4);
+        ctx.lineTo(leftEyeX + 2, eyeY - 5);
+        ctx.moveTo(rightEyeX + 4, eyeY - 4);
+        ctx.lineTo(rightEyeX - 2, eyeY - 5);
+        ctx.stroke();
+        // Third eye (center)
+        ctx.fillStyle = '#ff2244';
+        ctx.beginPath();
+        ctx.arc(0, eyeY - 6, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        // Snarling mouth
+        ctx.strokeStyle = '#ff4466';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(-5, eyeY + 6);
+        ctx.lineTo(-2, eyeY + 8);
+        ctx.lineTo(2, eyeY + 8);
+        ctx.lineTo(5, eyeY + 6);
+        ctx.stroke();
+      }
+    }
+
+    // Type-specific extra effects
+    if (entry.type === 'gold') {
+      // Floating coins around
+      for (let c = 0; c < 3; c++) {
+        const cp = (frameCount * 0.03 + c * 2.1) % (Math.PI * 2);
+        const coinX = Math.cos(cp) * (bw * 0.7);
+        const coinY = Math.sin(cp) * (bh * 0.8);
+        const coinAlpha = 0.4 + 0.3 * Math.sin(cp * 2);
+        ctx.save();
+        ctx.globalAlpha = coinAlpha;
+        ctx.fillStyle = '#ffd700';
+        ctx.beginPath();
+        ctx.arc(coinX, coinY, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+    if (entry.type === 'explosive') {
+      // Sparks
+      for (let s = 0; s < 2; s++) {
+        const sp = (frameCount * 0.08 + s * 3 + breathPhase) % (Math.PI * 2);
+        const sx = (Math.sin(sp) * bw * 0.3);
+        const sy = -bh / 2 - 2 - Math.abs(Math.sin(sp * 0.7)) * 4;
+        ctx.fillStyle = `rgba(255,${Math.floor(100 + Math.sin(sp) * 80)},0,${0.5 + Math.sin(sp) * 0.3})`;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    if (entry.type === 'boss') {
+      // Dark aura
+      const auraPulse = 0.15 + 0.1 * Math.sin(frameCount * 0.05);
+      const auraGrad = ctx.createRadialGradient(0, 0, bw * 0.3, 0, 0, bw * 0.8);
+      auraGrad.addColorStop(0, `rgba(80,0,40,0)`);
+      auraGrad.addColorStop(1, `rgba(80,0,40,${auraPulse})`);
+      ctx.fillStyle = auraGrad;
+      ctx.beginPath();
+      ctx.arc(0, 0, bw * 0.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+
+    // Text info to the right of brick preview
+    const textX = x + 72;
+    const textStartY = y + 16;
+    drawInkText(entry.name, textX + 42, textStartY, 16, '#f0e6d0', 'center', true);
+    drawInkText(`HP: ${entry.hp}`, textX + 42, textStartY + 22, 11, '#aaa088', 'center');
+    drawInkText(entry.desc, textX + 42, textStartY + 40, 10, '#8a7a6a', 'center');
+
+    // Destroyed count
+    const count = entry.type === 'spirit' ? 0 : bestiaryStats[entry.type as keyof BestiaryStats] || 0;
+    drawInkText(`\u00d7${count}`, textX + 42, textStartY + 58, 11, '#8b7530', 'center');
+  });
+
+  // Back button
+  if (drawButton(W / 2 - 60, H - 70, 120, 38, '返回', '#3c3c2c')) {
+    gameScreen = 'title';
+  }
 }
 
 function renderNameInput(): void {
@@ -3995,47 +4423,57 @@ function renderNameInput(): void {
   drawInkText('为旅者取名', W / 2, 100, 28, '#1a1a2e', 'center', true);
   drawInkText('山海经中记载，每位旅者皆有真名', W / 2, 140, 13, '#7a6a5a');
 
-  // Name presets
-  drawInkText('快捷选择:', W / 2, 200, 14, '#5a4a3a');
-  const presetY = 230;
+  // Name presets: 8 buttons in a 4x2 grid
+  drawInkText('快捷选择:', W / 2, 190, 14, '#5a4a3a');
+  const presetY = 215;
+  const presetCols = 4;
+  const presetBtnW = 80;
+  const presetBtnH = 34;
+  const presetGapX = 8;
+  const presetGapY = 8;
+  const presetTotalW = presetCols * presetBtnW + (presetCols - 1) * presetGapX;
+  const presetStartX = (W - presetTotalW) / 2;
   NAME_PRESETS.forEach((name, i) => {
-    const bx = 30 + (i % 3) * 115;
-    const by = presetY + Math.floor(i / 3) * 45;
-    if (drawButton(bx, by, 105, 36, name, '#3a3a2a')) {
+    const col = i % presetCols;
+    const row = Math.floor(i / presetCols);
+    const bx = presetStartX + col * (presetBtnW + presetGapX);
+    const by = presetY + row * (presetBtnH + presetGapY);
+    if (drawButton(bx, by, presetBtnW, presetBtnH, name, '#3a3a2a')) {
       passport.playerName = name;
       nameInputText = name;
       saveData();
-      gameScreen = 'title';
+      gameScreen = nameInputReturnScreen;
     }
   });
 
   // Custom input display
-  drawInkText('自定义名字:', W / 2, 350, 14, '#5a4a3a');
+  const customY = presetY + Math.ceil(NAME_PRESETS.length / presetCols) * (presetBtnH + presetGapY) + 20;
+  drawInkText('自定义名字:', W / 2, customY, 14, '#5a4a3a');
   ctx.save();
   ctx.fillStyle = '#f5ead0';
   ctx.beginPath();
-  roundRect(W / 2 - 100, 370, 200, 40, 6);
+  roundRect(W / 2 - 100, customY + 18, 200, 40, 6);
   ctx.fill();
   ctx.strokeStyle = '#3a2a1a';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  roundRect(W / 2 - 100, 370, 200, 40, 6);
+  roundRect(W / 2 - 100, customY + 18, 200, 40, 6);
   ctx.stroke();
   ctx.restore();
 
   const displayText = nameInputText + (nameInputCursor ? '|' : '');
-  drawInkText(displayText || '点击输入...', W / 2, 390, 18, nameInputText ? '#1a1a2e' : '#aaa');
+  drawInkText(displayText || '点击输入...', W / 2, customY + 38, 18, nameInputText ? '#1a1a2e' : '#aaa');
 
   if (nameInputText.length > 0) {
-    if (drawButton(W / 2 - 50, 430, 100, 36, '确定', '#3a5a2a')) {
-      passport.playerName = nameInputText;
+    if (drawButton(W / 2 - 50, customY + 70, 100, 36, '确定', '#3a5a2a')) {
+      passport.playerName = nameInputText.trim().slice(0, 12);
       saveData();
-      gameScreen = 'title';
+      gameScreen = nameInputReturnScreen;
     }
   }
 
-  if (drawButton(W / 2 - 50, 480, 100, 36, '返回', '#3c3c2c')) {
-    gameScreen = 'title';
+  if (drawButton(W / 2 - 50, customY + 118, 100, 36, '返回', '#3c3c2c')) {
+    gameScreen = nameInputReturnScreen;
   }
 }
 
@@ -4639,6 +5077,54 @@ function renderPlaying(): void {
     drawInkText('点击发射', W / 2, PADDLE_Y - 50, 16, '#5a4a3a');
     ctx.restore();
   }
+
+  // Tutorial hints (first run only)
+  if (tutorialHintTimer > 0) {
+    const hintAlpha = Math.min(1, tutorialHintTimer / 30) * (0.7 + 0.3 * Math.sin(frameCount * 0.06));
+    ctx.save();
+    ctx.globalAlpha = hintAlpha;
+    // Floating hint box above paddle
+    const hintY = PADDLE_Y - 90;
+    const hintW = 280;
+    const hintH = 36;
+    const hintX = W / 2 - hintW / 2;
+    ctx.fillStyle = 'rgba(30,20,10,0.75)';
+    ctx.beginPath();
+    roundRect(hintX, hintY, hintW, hintH, 8);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(200,180,140,0.5)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    roundRect(hintX, hintY, hintW, hintH, 8);
+    ctx.stroke();
+    ctx.globalAlpha = hintAlpha * 1.2;
+    drawInkText(tutorialHintText, W / 2, hintY + hintH / 2, 14, '#f0e6d0');
+    ctx.restore();
+    tutorialHintTimer--;
+  }
+
+  // Pause overlay (drawn before buttons so buttons render on top and are clickable)
+  if (gamePaused) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.shadowColor = '#ffd700';
+    ctx.shadowBlur = 15;
+    drawInkText('暂停', W / 2, H / 2 - 20, 42, '#f0e6d0', 'center', true);
+    ctx.shadowBlur = 0;
+    drawInkText('按 P/ESC 或点击 ⏸ 继续', W / 2, H / 2 + 30, 14, '#aaa088');
+    ctx.restore();
+  }
+
+  // Pause button (top-right corner, drawn on top of overlay)
+  if (drawButton(W - 44, 52, 36, 28, gamePaused ? '▶' : '⏸', '#3a3a2a')) {
+    togglePause();
+  }
+
+  // Mute button (next to pause)
+  if (drawButton(W - 84, 52, 36, 28, audioMuted ? '🔇' : '🔊', '#3a3a2a')) {
+    toggleMute();
+  }
 }
 
 function renderUpgrade(): void {
@@ -5062,12 +5548,26 @@ function shareResult(): void {
   } catch (_) { /* share not available */ }
 }
 
-function changePlayerName(): void {
-  const name = window.prompt('给自己取个名字吧（其他玩家可见）', passport.playerName || '');
-  if (name && name.trim()) {
-    passport.playerName = name.trim().slice(0, 12);
-    saveData();
+function toggleMute(): void {
+  audioMuted = !audioMuted;
+  try { localStorage.setItem('mq3_muted', audioMuted ? '1' : '0'); } catch (_) { /* */ }
+  if (audioMuted) {
+    if (audioCtx) {
+      audioCtx.suspend();
+    }
+  } else {
+    if (audioCtx) {
+      audioCtx.resume();
+    }
   }
+}
+
+let nameInputReturnScreen: GameScreen = 'title';
+
+function changePlayerName(): void {
+  nameInputReturnScreen = gameScreen;
+  nameInputText = passport.playerName === '旅行者' ? '' : passport.playerName;
+  gameScreen = 'nameInput';
 }
 
 // ============================================================================
@@ -5171,7 +5671,14 @@ function update(): void {
     paddleTargetX += 6;
   }
   if (inputActive) {
-    paddleTargetX = inputX;
+    // Smooth blend after unpause: interpolate from saved position to current mouse
+    if (unpauseBlendFrames > 0) {
+      const t = 1 - unpauseBlendFrames / 10;
+      paddleTargetX = prePauseInputX + (inputX - prePauseInputX) * t;
+      unpauseBlendFrames--;
+    } else {
+      paddleTargetX = inputX;
+    }
   }
 
   const pw = getEffectivePaddleW();
@@ -5221,12 +5728,26 @@ function render(): void {
     case 'shop': renderShop(); break;
     case 'leaderboard': renderLeaderboard(); break;
     case 'daily': renderTitle(); break;
+    case 'bestiary': renderBestiary(); break;
   }
 }
 
+const TARGET_FRAME_MS = 1000 / 60; // 60fps target
+let frameAccumulator = 0;
+
 function gameLoop(timestamp: number): void {
-  dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  const elapsed = timestamp - lastTime;
   lastTime = timestamp;
+  dt = Math.min(elapsed / 1000, 0.05);
+
+  // Clamp to 60fps: accumulate time, only step when enough has passed
+  frameAccumulator += elapsed;
+  if (frameAccumulator < TARGET_FRAME_MS) {
+    requestAnimationFrame(gameLoop);
+    return;
+  }
+  // Consume one frame; don't let accumulator pile up (max 2 frames catch-up)
+  frameAccumulator = Math.min(frameAccumulator - TARGET_FRAME_MS, TARGET_FRAME_MS);
 
   clicked = false;
 
@@ -5237,7 +5758,9 @@ function gameLoop(timestamp: number): void {
     pendingClick = null;
   }
 
-  update();
+  if (!gamePaused) {
+    update();
+  }
   render();
 
   clicked = false;
@@ -5270,6 +5793,8 @@ canvas.addEventListener('touchmove', (e) => {
   e.preventDefault();
   const touch = e.touches[0];
   const pos = canvasCoords(touch.clientX, touch.clientY);
+  // Ignore touch in HUD area (top 60px) to avoid paddle jumping to pause/mute buttons
+  if (gameScreen === 'playing' && pos.y < 60) return;
   inputX = pos.x;
 }, { passive: false });
 
@@ -5292,9 +5817,13 @@ canvas.addEventListener('mousedown', (e) => {
 });
 
 canvas.addEventListener('mousemove', (e) => {
-  if (inputActive) {
-    const pos = canvasCoords(e.clientX, e.clientY);
-    inputX = pos.x;
+  // Always track mouse position for smooth paddle control (no click-hold required)
+  const pos = canvasCoords(e.clientX, e.clientY);
+  // Ignore mouse in HUD area (top 60px) to avoid paddle jumping to pause/mute buttons
+  if (gameScreen === 'playing' && pos.y < 60) return;
+  inputX = pos.x;
+  if (gameScreen === 'playing') {
+    inputActive = true;
   }
 });
 
@@ -5309,15 +5838,19 @@ window.addEventListener('keydown', (e) => {
     ensureAudio();
     launchBall();
   }
+  // Pause toggle
+  if ((e.key === 'p' || e.key === 'P' || e.key === 'Escape') && gameScreen === 'playing') {
+    togglePause();
+  }
   // Name input handling
   if (gameScreen === 'nameInput') {
     if (e.key === 'Backspace') {
       nameInputText = nameInputText.slice(0, -1);
     } else if (e.key === 'Enter' && nameInputText.length > 0) {
-      passport.playerName = nameInputText;
+      passport.playerName = nameInputText.trim().slice(0, 12);
       saveData();
-      gameScreen = 'title';
-    } else if (e.key.length === 1 && nameInputText.length < 8) {
+      gameScreen = nameInputReturnScreen;
+    } else if (e.key.length === 1 && nameInputText.length < 12) {
       nameInputText += e.key;
     }
   }

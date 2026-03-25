@@ -26,6 +26,9 @@ const DAILY_BEST_KEY = 'cloud_crossing_daily_best';
 const PASSPORT_KEY = 'melos_passport';
 const ACHIEVEMENTS_KEY = 'cloud_crossing_achievements';
 const PLAYER_NAME_KEY = 'cloud_crossing_player_name';
+const GHOST_DATA_KEY = 'melos_ghost_2';
+const GHOST_SCORE_KEY = 'melos_ghost_2_score';
+const GHOST_MAX_FRAMES = 18000; // 5 min at 60fps
 
 // ── Types ──────────────────────────────────────────────────────────────────
 type GameScreen = 'title' | 'playing' | 'dead' | 'charSelect' | 'leaderboard' | 'nameInput';
@@ -207,11 +210,8 @@ function setPlayerName(name: string) {
 }
 
 function changePlayerName() {
-  const passport = loadPassport();
-  const name = window.prompt('给自己取个名字吧（其他玩家可见）', passport.playerName || '');
-  if (name && name.trim()) {
-    setPlayerName(name.trim().slice(0, 12));
-  }
+  nameInputValue = getPlayerName();
+  setScreen('nameInput');
 }
 
 // ── Achievement definitions ──────────────────────────────────────────────
@@ -262,6 +262,7 @@ class GameAudio {
   // Public: ensure AudioContext is created on user gesture (mobile browsers require this)
   ensureInit() { this.init(); }
   private noise(duration: number, gain: number, freq?: number) {
+    if (this.muted) return;
     this.init();
     const c = this.ctx!;
     const t = c.currentTime;
@@ -287,6 +288,7 @@ class GameAudio {
     src.stop(t + duration);
   }
   private tone(freq: number, duration: number, gain: number, type: OscillatorType = 'sine') {
+    if (this.muted) return;
     this.init();
     const c = this.ctx!;
     const t = c.currentTime;
@@ -307,6 +309,7 @@ class GameAudio {
   }
   // Whoosh sound for obstacle pass
   whoosh() {
+    if (this.muted) return;
     this.init();
     const c = this.ctx!;
     const t = c.currentTime;
@@ -323,6 +326,7 @@ class GameAudio {
   }
   // Bass thud for collision impact
   impactThud() {
+    if (this.muted) return;
     this.init();
     const c = this.ctx!;
     const t = c.currentTime;
@@ -338,6 +342,7 @@ class GameAudio {
     osc.stop(t + 0.2);
   }
   nearMissChime() {
+    if (this.muted) return;
     this.init();
     const c = this.ctx!;
     const t = c.currentTime;
@@ -357,6 +362,7 @@ class GameAudio {
     }
   }
   powerUp() {
+    if (this.muted) return;
     this.init();
     const c = this.ctx!;
     const t = c.currentTime;
@@ -381,6 +387,7 @@ class GameAudio {
     this.noise(0.3, 0.2, 200);
   }
   achievementSound() {
+    if (this.muted) return;
     this.init();
     const c = this.ctx!;
     const t = c.currentTime;
@@ -399,6 +406,7 @@ class GameAudio {
     }
   }
   milestone(n: number) {
+    if (this.muted) return;
     const base = n >= 100 ? 523 : n >= 50 ? 440 : n >= 25 ? 392 : 349;
     const delays = [0, 0.08, 0.16, 0.24];
     const freqs = [base, base * 1.25, base * 1.5, base * 2];
@@ -420,6 +428,7 @@ class GameAudio {
 
   // UI tap (subtle click)
   uiTap() {
+    if (this.muted) return;
     this.init();
     const c = this.ctx!;
     const t = c.currentTime;
@@ -437,6 +446,7 @@ class GameAudio {
 
   // Stage transition (ethereal rising shimmer)
   stageTransition() {
+    if (this.muted) return;
     this.init();
     const c = this.ctx!;
     const t = c.currentTime;
@@ -462,6 +472,7 @@ class GameAudio {
 
   // Combo sound (rising pitch based on combo count)
   comboHit(count: number) {
+    if (this.muted) return;
     this.init();
     const c = this.ctx!;
     const t = c.currentTime;
@@ -480,6 +491,7 @@ class GameAudio {
 
   // Flap sound (soft wind whoosh + pitch)
   flapSound() {
+    if (this.muted) return;
     this.init();
     const c = this.ctx!;
     const t = c.currentTime;
@@ -506,8 +518,11 @@ class GameAudio {
   private bgmPercTimer = 0;
   private bgmHarmTimer = 0;
   private bgmScore = 0;
+  private bgmScheduleId: ReturnType<typeof setTimeout> | null = null;
+  muted = gameMuted;
 
   playBGM() {
+    if (this.muted) return;
     this.init();
     if (this.bgmPlaying) return;
     this.bgmPlaying = true;
@@ -529,6 +544,10 @@ class GameAudio {
   }
 
   stopBGM() {
+    if (this.bgmScheduleId !== null) {
+      clearTimeout(this.bgmScheduleId);
+      this.bgmScheduleId = null;
+    }
     this.bgmPlaying = false;
     if (this.bgmDroneOsc) {
       try { this.bgmDroneOsc.stop(); } catch { /* ignore */ }
@@ -603,7 +622,7 @@ class GameAudio {
       this.bgmHarmTimer = now + 0.8 + Math.random() * 0.6;
     }
 
-    setTimeout(() => this.scheduleBGMLayers(), 100);
+    this.bgmScheduleId = setTimeout(() => this.scheduleBGMLayers(), 100);
   }
 }
 
@@ -635,11 +654,24 @@ function resizeCanvas() {
   else { ch = wh; cw = wh * aspect; }
   canvas.style.width = `${cw}px`;
   canvas.style.height = `${ch}px`;
+
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // Regenerate vignette since canvas resize clears context state
+  if (vignetteGrad !== null || paperCanvas !== null) {
+    vignetteGrad = generateVignette();
+  }
 }
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
 // ── State ──────────────────────────────────────────────────────────────────
+// Mute state (must be declared before GameAudio so the constructor reads correct value)
+const MUTE_KEY = 'cloud_crossing_muted';
+let gameMuted = localStorage.getItem(MUTE_KEY) === 'true';
+
 const audio = new GameAudio();
 let gameScreen: GameScreen = 'title';
 let score = 0;
@@ -700,6 +732,40 @@ let cloudDrifts: CloudDrift[] = [];
 // Wing flap animation
 let wingFlapTimer = 0;
 let wingFlapAngle = 0;
+
+// Ghost Race replay system
+let ghostRaceData: number[] = [];          // recorded playerY each frame during current run
+let ghostRaceFrameIndex = 0;              // current frame index for replay
+let ghostReplayData: number[] | null = null; // loaded ghost data from previous best
+let ghostReplayScore = 0;                  // the score the ghost achieved
+let ghostSurpassed = false;                // whether player has passed ghost's death point
+let ghostSurpassFlashTimer = 0;            // timer for "超越幽影!" celebration
+
+function loadGhostReplay(): void {
+  try {
+    const raw = localStorage.getItem(GHOST_DATA_KEY);
+    const sc = localStorage.getItem(GHOST_SCORE_KEY);
+    if (raw && sc) {
+      ghostReplayData = JSON.parse(raw);
+      ghostReplayScore = parseInt(sc, 10) || 0;
+    } else {
+      ghostReplayData = null;
+      ghostReplayScore = 0;
+    }
+  } catch {
+    ghostReplayData = null;
+    ghostReplayScore = 0;
+  }
+}
+
+function saveGhostData(data: number[], ghostScore: number): void {
+  try {
+    // Cap to prevent localStorage bloat
+    const capped = data.slice(0, GHOST_MAX_FRAMES);
+    localStorage.setItem(GHOST_DATA_KEY, JSON.stringify(capped));
+    localStorage.setItem(GHOST_SCORE_KEY, String(ghostScore));
+  } catch { /* localStorage full, ignore */ }
+}
 
 // Ghost afterimage trail
 interface GhostImage {
@@ -829,10 +895,21 @@ let achievementDisplayTimer = 0;
 
 // Name input state
 let nameInputValue = '';
-const PRESET_NAMES = ['云游客', '山海行者', '红巾少侠', '御风者', '踏云人'];
+const PRESET_NAMES = ['麦洛', '山海客', '逐风者', '墨侠', '凌云客', '御风人', '飞仙', '自定义'];
 
 // Challenge code
 let challengeCode = '';
+
+// Leaderboard tab state
+let showDailyLeaderboard = false;
+
+// Pause state
+let gamePaused = false;
+
+// Mute state (declared earlier, before GameAudio instantiation)
+
+// Hold-to-flap delay timer
+let holdDelayTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // ── Persistence helpers ────────────────────────────────────────────────────
 function loadLeaderboard(key: string): LeaderboardEntry[] {
@@ -895,21 +972,20 @@ function generateChallengeCode(s: number): string {
   return combined.toString(36).toUpperCase();
 }
 
-function decodeChallengeCode(code: string): { score: number } | null {
-  try {
-    const combined = parseInt(code, 36);
-    const s = combined % 1000;
-    return { score: s };
-  } catch {
-    return null;
-  }
-}
-
 // ── Particle pool ──────────────────────────────────────────────────────────
 function getParticle(): Particle | null {
   if (particlePool.length > 0) return particlePool.pop()!;
   const activeCount = particles.filter(p => p.active).length;
-  if (activeCount >= MAX_PARTICLES) return null;
+  if (activeCount >= MAX_PARTICLES) {
+    // Recycle the oldest active particle instead of returning null
+    for (const p of particles) {
+      if (p.active) {
+        p.active = false;
+        return p;
+      }
+    }
+    return null;
+  }
   const p: Particle = { x: 0, y: 0, vx: 0, vy: 0, life: 0, maxLife: 1, size: 2, color: '#000', type: 'trail', active: false };
   particles.push(p);
   return p;
@@ -1403,7 +1479,11 @@ function updateStageParticles(dt: number) {
     }
 
     if (sp.life <= 0 || sp.x < -30 || sp.x > W + 30 || sp.y < -30 || sp.y > H + 30) {
-      stageParticles.splice(i, 1);
+      // Swap-and-pop for O(1) removal
+      stageParticles[i] = stageParticles[stageParticles.length - 1];
+      stageParticles.pop();
+      // Re-check the swapped element at same index
+      // (loop is reverse so we just continue; the swapped element at i will be checked next iteration if i > 0)
     }
   }
 
@@ -1788,15 +1868,20 @@ function inkBrushRect(x: number, y: number, w: number, h: number, alpha: number 
   ctx.quadraticCurveTo(x, y, x + r, y);
   ctx.fill();
   ctx.globalAlpha = alpha * 0.3;
+  // Deterministic splatter positions based on x/y to prevent flickering
+  const seed = x * 73.13 + y * 37.97;
   for (let i = 0; i < 6; i++) {
-    const bx = x + Math.random() * w;
-    const by = y + Math.random() * 4 - 2;
+    const si = seed + i * 127.31;
+    const bx = x + ((si * 9301 + 49297) % 233280) / 233280 * w;
+    const by = y + ((si * 7919 + 12553) % 233280) / 233280 * 4 - 2;
+    const r1 = 2 + ((si * 3571 + 81929) % 233280) / 233280 * 3;
     ctx.beginPath();
-    ctx.arc(bx, by, 2 + Math.random() * 3, 0, Math.PI * 2);
+    ctx.arc(bx, by, r1, 0, Math.PI * 2);
     ctx.fill();
-    const by2 = y + h + Math.random() * 4 - 2;
+    const by2 = y + h + ((si * 6173 + 29191) % 233280) / 233280 * 4 - 2;
+    const r2 = 2 + ((si * 4201 + 63949) % 233280) / 233280 * 3;
     ctx.beginPath();
-    ctx.arc(bx, by2, 2 + Math.random() * 3, 0, Math.PI * 2);
+    ctx.arc(bx, by2, r2, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.restore();
@@ -2671,8 +2756,10 @@ function drawButton(b: Button, style: 'primary' | 'secondary' = 'secondary') {
 function getGapWidth(): number {
   const startGap = 180;
   const minGap = 120;
-  const t = Math.min(1, score / 50);
-  return startGap - (startGap - minGap) * (t * t);
+  // Logarithmic curve: stays wider longer in the 25-45 range, then narrows gradually
+  // At score 25: ~163, score 35: ~155, score 45: ~147, score 50: ~143, score 80+: ~125
+  const t = Math.min(1, Math.log(1 + score) / Math.log(1 + 80));
+  return startGap - (startGap - minGap) * t;
 }
 
 function getScrollSpeed(): number {
@@ -2750,6 +2837,7 @@ function spawnPowerUp(x: number) {
 
 // ── Game logic ─────────────────────────────────────────────────────────────
 function resetGame() {
+  gamePaused = false;
   score = 0;
   combo = 0;
   comboTimer = 0;
@@ -2834,11 +2922,19 @@ function resetGame() {
     dailyRNG = null;
   }
 
+  // Ghost race system
+  ghostRaceData = [];
+  ghostRaceFrameIndex = 0;
+  ghostSurpassed = false;
+  ghostSurpassFlashTimer = 0;
+  loadGhostReplay();
+
   incrementPassportGamesPlayed();
 }
 
 function flap() {
   if (gameScreen !== 'playing') return;
+  if (gamePaused) return;
   playerVy = FLAP_VEL;
   wingFlapTimer = 0.3; // trigger wing flap animation
   audio.flapSound();
@@ -2876,6 +2972,10 @@ function startDeathAnimation() {
 }
 
 function die() {
+  // Guard against re-entry during death animation (e.g. shield acquired during anim)
+  // Allow the final die() call when animation completes (deathAnimating is true but timer expired)
+  if (deathAnimating && deathAnimTimer < 1.0 && deathPlayerY <= H + 50) return;
+
   if (shieldPowerUpActive) {
     shieldPowerUpActive = false;
     shakeTimer = 0.15;
@@ -2909,6 +3009,7 @@ function die() {
   deathAnimating = false;
   flashTimer = 0.15;
   audio.stopBGM();
+  clearHoldTimers();
 
   // Final death particles
   for (let i = 0; i < 15; i++) {
@@ -2935,6 +3036,11 @@ function die() {
   if (score > highScore) {
     highScore = score;
     localStorage.setItem(HIGH_SCORE_KEY, String(highScore));
+  }
+
+  // Save ghost data if this run beats the previous ghost score
+  if (score > ghostReplayScore && ghostRaceData.length > 0) {
+    saveGhostData(ghostRaceData, score);
   }
 
   // Check achievements
@@ -2969,9 +3075,12 @@ function die() {
     dailyRank = 0;
   }
 
-  // Prompt for name on first game over if still using default name
+  // Show name input screen on first game over if still using default name
   if (getPlayerName() === '旅行者') {
-    setTimeout(changePlayerName, 800);
+    setTimeout(() => {
+      nameInputValue = '';
+      setScreen('nameInput');
+    }, 800);
   }
 }
 
@@ -3075,6 +3184,8 @@ function triggerNearMiss(obs: Obstacle) {
     spawnParticle(px, playerY, Math.cos(a) * sp, Math.sin(a) * sp, 0.5, 3 + Math.random() * 3, '#ffd700', 'near_miss');
   }
 
+  // Show the actual near-miss bonus in the score pop
+  spawnScorePop(px + 20, playerY - 30, bonus > 0 ? bonus : 1);
   const chainText = nearMissChain > 1 ? `险! x${nearMissChain}` : '险!';
   spawnFloatingText(px + 30, playerY - 20, chainText, '#ffd700', 28);
 }
@@ -3141,6 +3252,9 @@ function update(dt: number) {
     achievementDisplayTimer -= dt;
   }
 
+  // Freeze game update when paused
+  if (gamePaused && gameScreen === 'playing') return;
+
   if (gameScreen === 'dead') {
     deathTime += dt;
     if (shakeTimer > 0) shakeTimer -= dt;
@@ -3200,7 +3314,7 @@ function update(dt: number) {
     if (Math.random() < 0.6) {
       spawnParticle(
         W * 0.15, deathPlayerY,
-        rngRange(-30, -60), rngRange(-10, 10),
+        -30 + Math.random() * -30, -10 + Math.random() * 20,
         0.3, 2 + Math.random() * 3,
         '#1a1a1a', 'death'
       );
@@ -3237,6 +3351,33 @@ function update(dt: number) {
   const effectiveGravity = wingsActive ? GRAVITY * 0.6 : GRAVITY;
   playerVy += effectiveGravity * sDt;
   playerY += playerVy * sDt;
+
+  // Ghost race: record playerY each frame and advance replay index
+  if (ghostRaceData.length < GHOST_MAX_FRAMES) {
+    ghostRaceData.push(playerY);
+  }
+  ghostRaceFrameIndex++;
+
+  // Ghost surpass flash timer
+  if (ghostSurpassFlashTimer > 0) ghostSurpassFlashTimer -= dt;
+
+  // Check if player surpassed ghost
+  if (ghostReplayData && !ghostSurpassed && score > ghostReplayScore) {
+    ghostSurpassed = true;
+    ghostSurpassFlashTimer = 2.0;
+    // Celebration particles
+    for (let i = 0; i < 20; i++) {
+      const a = (i / 20) * Math.PI * 2;
+      const sp = 80 + Math.random() * 120;
+      spawnParticle(
+        W * 0.15, playerY,
+        Math.cos(a) * sp, Math.sin(a) * sp,
+        0.8 + Math.random() * 0.4,
+        3 + Math.random() * 5,
+        '#c0c0c0', 'star'
+      );
+    }
+  }
 
   // Update scarf segments
   if (scarfSegments.length > 0) {
@@ -3389,12 +3530,13 @@ function update(dt: number) {
   // Power-up collision
   checkPowerUpCollision();
 
-  // Update floating texts (with bounce/scale for score pops)
+  // Update floating texts (with scale for score pops, constant upward drift)
   for (const ft of floatingTexts) {
     ft.life -= dt;
     if (ft.vy !== undefined) {
       ft.y += ft.vy * dt;
-      ft.vy += 120 * dt; // gravity on the pop
+      // Decelerate upward but never reverse direction (no gravity pulling back down)
+      if (ft.vy < -20) ft.vy *= 0.96;
     } else {
       ft.y -= 40 * dt;
     }
@@ -3979,6 +4121,32 @@ function drawTitle() {
   buttons.push(nameBtn);
   drawButton(nameBtn);
 
+  // Mute button (top-right on title)
+  const titleMuteBtnX = W - 44;
+  const titleMuteBtnY = 15;
+  const titleMuteBtn: Button = {
+    x: titleMuteBtnX, y: titleMuteBtnY, w: 32, h: 32,
+    label: '', action: () => {
+      gameMuted = !gameMuted;
+      audio.muted = gameMuted;
+      localStorage.setItem(MUTE_KEY, String(gameMuted));
+      if (gameMuted) { audio.stopBGM(); }
+    }
+  };
+  buttons.push(titleMuteBtn);
+  ctx.save();
+  ctx.globalAlpha = 0.5;
+  ctx.fillStyle = 'rgba(240,230,211,0.6)';
+  ctx.beginPath();
+  ctx.arc(titleMuteBtnX + 16, titleMuteBtnY + 16, 16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.font = '700 14px "Noto Serif SC", serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(gameMuted ? '静' : '音', titleMuteBtnX + 16, titleMuteBtnY + 16);
+  ctx.restore();
+
   // Chapter indicator at bottom
   drawText('麦洛的冒险 · 第二章', W / 2, H - 40, 12, '#999');
 
@@ -3990,6 +4158,7 @@ function drawTitle() {
 }
 
 function drawPlaying() {
+  buttons = [];
   drawSkyBackground();
 
   // Aurora (behind clouds, for starry crossing)
@@ -4105,6 +4274,100 @@ function drawPlaying() {
       ctx.lineWidth = 2;
       ctx.stroke();
     }
+    ctx.restore();
+  }
+
+  // Ghost Race replay (rendered behind real player)
+  if (ghostReplayData && ghostRaceFrameIndex > 0) {
+    const gi = Math.min(ghostRaceFrameIndex - 1, ghostReplayData.length - 1);
+    if (gi < ghostReplayData.length) {
+      const ghostY = ghostReplayData[gi];
+      const ghostX = W * 0.15;
+      const ghostR = PLAYER_RADIUS * 0.85; // slightly smaller
+
+      ctx.save();
+
+      // Ghost trail (silver particles behind)
+      if (ghostRaceFrameIndex % 3 === 0) {
+        ctx.globalAlpha = 0.15;
+        ctx.fillStyle = '#c0c0c0';
+        for (let t = 1; t <= 3; t++) {
+          const trailIdx = Math.max(0, gi - t * 4);
+          if (trailIdx < ghostReplayData.length) {
+            const ty = ghostReplayData[trailIdx];
+            ctx.beginPath();
+            ctx.arc(ghostX + t * 4, ty, ghostR * (1 - t * 0.2), 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+
+      // Ghost body - semi-transparent silver/grey
+      ctx.globalAlpha = 0.3;
+      const ghostGrad = ctx.createRadialGradient(ghostX, ghostY, 0, ghostX, ghostY, ghostR * 1.5);
+      ghostGrad.addColorStop(0, 'rgba(192,192,192,0.4)');
+      ghostGrad.addColorStop(0.5, 'rgba(160,160,160,0.25)');
+      ghostGrad.addColorStop(1, 'rgba(128,128,128,0)');
+      ctx.fillStyle = ghostGrad;
+      ctx.beginPath();
+      ctx.arc(ghostX, ghostY, ghostR * 1.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Inner body
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = '#b0b0b0';
+      ctx.beginPath();
+      ctx.arc(ghostX, ghostY, ghostR, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Eyes (simple dots)
+      ctx.globalAlpha = 0.4;
+      ctx.fillStyle = '#666';
+      ctx.beginPath();
+      ctx.arc(ghostX - ghostR * 0.3, ghostY - ghostR * 0.15, 1.5, 0, Math.PI * 2);
+      ctx.arc(ghostX + ghostR * 0.1, ghostY - ghostR * 0.15, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // "幽影" label above ghost
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = '#999';
+      ctx.font = '600 10px "Noto Serif SC", serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(`幽影 (${ghostReplayScore})`, ghostX, ghostY - ghostR - 6);
+
+      ctx.restore();
+
+      // Ghost death marker: show "×" at the last frame position when we are near/past it
+      if (gi >= ghostReplayData.length - 5) {
+        const deathY = ghostReplayData[ghostReplayData.length - 1];
+        ctx.save();
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = '#999';
+        ctx.font = '700 16px "Noto Serif SC", serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('×', ghostX, deathY);
+        ctx.restore();
+      }
+    }
+  }
+
+  // "超越幽影!" celebration text
+  if (ghostSurpassFlashTimer > 0) {
+    const alpha = Math.min(1, ghostSurpassFlashTimer);
+    const scale = 1 + (2.0 - ghostSurpassFlashTimer) * 0.1;
+    ctx.save();
+    ctx.translate(W / 2, H * 0.3);
+    ctx.scale(scale, scale);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#c0c0c0';
+    ctx.shadowColor = '#fff';
+    ctx.shadowBlur = 12;
+    ctx.font = '900 28px "Noto Serif SC", serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('超越幽影!', 0, 0);
     ctx.restore();
   }
 
@@ -4465,10 +4728,78 @@ function drawPlaying() {
     drawSealStamp(achCardX + 30, achCardY + achCardH / 2, ach.name, 14, true);
     drawText(`印章解锁: ${ach.name}`, achCardX + achCardW / 2 + 15, achCardY + achCardH / 2, 14, '#c23030');
     ctx.restore();
-    if (achievementDisplayTimer <= 0) {
-      achievementDisplayQueue.shift();
-      if (achievementDisplayQueue.length > 0) achievementDisplayTimer = 3;
+  }
+  // Advance achievement queue when timer expires
+  if (achievementDisplayTimer <= 0 && achievementDisplayQueue.length > 0) {
+    achievementDisplayQueue.shift();
+    if (achievementDisplayQueue.length > 0) achievementDisplayTimer = 3;
+  }
+
+  // Pause button (top-right)
+  const pauseBtnX = W - 44;
+  const pauseBtnY = 58;
+  const pauseBtn: Button = {
+    x: pauseBtnX, y: pauseBtnY, w: 32, h: 32,
+    label: '', action: () => { gamePaused = !gamePaused; }
+  };
+  buttons.push(pauseBtn);
+  ctx.save();
+  ctx.globalAlpha = 0.5;
+  ctx.fillStyle = 'rgba(240,230,211,0.6)';
+  ctx.beginPath();
+  ctx.arc(pauseBtnX + 16, pauseBtnY + 16, 16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  if (gamePaused) {
+    // Play triangle icon
+    ctx.beginPath();
+    ctx.moveTo(pauseBtnX + 12, pauseBtnY + 8);
+    ctx.lineTo(pauseBtnX + 24, pauseBtnY + 16);
+    ctx.lineTo(pauseBtnX + 12, pauseBtnY + 24);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    // Pause bars icon
+    ctx.fillRect(pauseBtnX + 10, pauseBtnY + 9, 5, 14);
+    ctx.fillRect(pauseBtnX + 18, pauseBtnY + 9, 5, 14);
+  }
+  ctx.restore();
+
+  // Mute button (below pause)
+  const muteBtnX = W - 44;
+  const muteBtnY = 96;
+  const muteBtn: Button = {
+    x: muteBtnX, y: muteBtnY, w: 32, h: 32,
+    label: '', action: () => {
+      gameMuted = !gameMuted;
+      audio.muted = gameMuted;
+      localStorage.setItem(MUTE_KEY, String(gameMuted));
+      if (gameMuted) { audio.stopBGM(); } else if (gameScreen === 'playing' && !gamePaused) { audio.playBGM(); }
     }
+  };
+  buttons.push(muteBtn);
+  ctx.save();
+  ctx.globalAlpha = 0.5;
+  ctx.fillStyle = 'rgba(240,230,211,0.6)';
+  ctx.beginPath();
+  ctx.arc(muteBtnX + 16, muteBtnY + 16, 16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.font = '700 14px "Noto Serif SC", serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(gameMuted ? '静' : '音', muteBtnX + 16, muteBtnY + 16);
+  ctx.restore();
+
+  // Pause overlay
+  if (gamePaused) {
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = '#f0e6d3';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+    drawCalliText('暂停', W / 2, H * 0.4, 48, '#1a1a1a', 0.9);
+    drawText('点击继续按钮或按P键', W / 2, H * 0.4 + 50, 14, '#666');
   }
 
   // Vignette
@@ -4864,16 +5195,14 @@ function drawLeaderboard() {
   const normalLb = leaderboard;
   const dailyLb = dailyLeaderboard;
 
-  let showDaily = false;
-
-  const tabNormal: Button = { x: W / 2 - 120, y: tabY, w: 110, h: 36, label: '总排行', action: () => { showDaily = false; } };
-  const tabDaily: Button = { x: W / 2 + 10, y: tabY, w: 110, h: 36, label: '每日挑战', action: () => { showDaily = true; } };
+  const tabNormal: Button = { x: W / 2 - 120, y: tabY, w: 110, h: 36, label: '总排行', action: () => { showDailyLeaderboard = false; } };
+  const tabDaily: Button = { x: W / 2 + 10, y: tabY, w: 110, h: 36, label: '每日挑战', action: () => { showDailyLeaderboard = true; } };
   buttons.push(tabNormal);
   buttons.push(tabDaily);
-  drawButton(tabNormal, showDaily ? 'secondary' : 'primary');
-  drawButton(tabDaily, showDaily ? 'primary' : 'secondary');
+  drawButton(tabNormal, showDailyLeaderboard ? 'secondary' : 'primary');
+  drawButton(tabDaily, showDailyLeaderboard ? 'primary' : 'secondary');
 
-  const lb = showDaily ? dailyLb : normalLb;
+  const lb = showDailyLeaderboard ? dailyLb : normalLb;
 
   const startY = 150;
   if (lb.length === 0) {
@@ -4929,7 +5258,14 @@ function drawNameInput() {
     const btn: Button = {
       x: bx, y: by, w: 100, h: 40,
       label: name,
-      action: () => { nameInputValue = name; },
+      action: () => {
+        if (name === '自定义') {
+          // Clear input so user can type a custom name via keyboard
+          nameInputValue = '';
+        } else {
+          nameInputValue = name;
+        }
+      },
     };
     buttons.push(btn);
     drawButton(btn, isSelected ? 'primary' : 'secondary');
@@ -5039,6 +5375,8 @@ function setScreen(screen: GameScreen) {
   gameScreen = screen;
   screenTransitionCooldown = SCREEN_TRANSITION_COOLDOWN;
   buttons = []; // clear stale buttons immediately
+  clearHoldTimers();
+  if (screen !== 'playing') gamePaused = false;
 }
 
 function handleTap(cx: number, cy: number) {
@@ -5059,12 +5397,7 @@ function handleTap(cx: number, cy: number) {
     }
   }
 
-  if (gameScreen === 'title') {
-    isDailyChallenge = false;
-    resetGame();
-    setScreen('playing');
-    audio.playBGM();
-  } else if (gameScreen === 'playing') {
+  if (gameScreen === 'playing') {
     flap();
   }
 }
@@ -5073,25 +5406,34 @@ function handleTap(cx: number, cy: number) {
 let holdInterval: ReturnType<typeof setInterval> | null = null;
 let isPointerDown = false;
 
+function clearHoldTimers() {
+  if (holdDelayTimeout) { clearTimeout(holdDelayTimeout); holdDelayTimeout = null; }
+  if (holdInterval) { clearInterval(holdInterval); holdInterval = null; }
+}
+
 canvas.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   isPointerDown = true;
   const pos = getCanvasPos(e.clientX, e.clientY);
   handleTap(pos.x, pos.y);
-  // Start rapid flap after 200ms hold, every 120ms
+  // Start rapid flap after 200ms hold delay, then every 120ms
+  clearHoldTimers();
   if (gameScreen === 'playing') {
-    holdInterval = setInterval(() => {
-      if (isPointerDown && gameScreen === 'playing') flap();
-    }, 120);
+    holdDelayTimeout = setTimeout(() => {
+      holdInterval = setInterval(() => {
+        if (gamePaused) return;
+        if (isPointerDown && gameScreen === 'playing') flap();
+      }, 120);
+    }, 200);
   }
 });
 canvas.addEventListener('pointerup', () => {
   isPointerDown = false;
-  if (holdInterval) { clearInterval(holdInterval); holdInterval = null; }
+  clearHoldTimers();
 });
 canvas.addEventListener('pointercancel', () => {
   isPointerDown = false;
-  if (holdInterval) { clearInterval(holdInterval); holdInterval = null; }
+  clearHoldTimers();
 });
 
 document.addEventListener('keydown', (e) => {
@@ -5128,6 +5470,12 @@ document.addEventListener('keydown', (e) => {
       resetGame();
       setScreen('playing');
       audio.playBGM();
+    }
+  }
+  if (e.code === 'KeyP' || e.code === 'Escape') {
+    if (gameScreen === 'playing') {
+      gamePaused = !gamePaused;
+      return;
     }
   }
   if (e.code === 'Escape') {

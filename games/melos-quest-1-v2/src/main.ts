@@ -243,12 +243,17 @@ function getMoveDir():{x:number,y:number}{
 
 let au: AudioContext|null = null;
 let masterGain: GainNode|null = null;
+// Fix #16: mute toggle with localStorage persistence
+let audioMuted = false;
+try{audioMuted=localStorage.getItem('shanhai_muted')==='true'}catch{}
+function toggleMute(){audioMuted=!audioMuted;try{localStorage.setItem('shanhai_muted',audioMuted?'true':'false')}catch{}
+  if(masterGain)masterGain.gain.value=audioMuted?0:0.7;}
 function initAudio(){
   if(au)return;
   au=new AudioContext();
   if(au.state==='suspended')au.resume();
   masterGain=au.createGain();
-  masterGain.gain.value=0.7;
+  masterGain.gain.value=audioMuted?0:0.7;
   masterGain.connect(au.destination);
   startBGM();
 }
@@ -259,28 +264,30 @@ document.addEventListener('keydown',initAudio,{once:true});
 function getMaster():AudioNode{return masterGain||au!.destination}
 
 function tone(f:number,dur:number,type:OscillatorType='sine',vol=0.1,delay=0){
-  if(!au)return;
+  if(!au||audioMuted)return;
   const t0=au.currentTime+delay;
   const o=au.createOscillator(),g=au.createGain();
   o.type=type;o.frequency.value=f;
   g.gain.setValueAtTime(vol,t0);
   g.gain.exponentialRampToValueAtTime(0.001,t0+dur);
   o.connect(g);g.connect(getMaster());o.start(t0);o.stop(t0+dur);
+  o.onended=()=>{o.disconnect();g.disconnect()}; // Fix #10
 }
 
 // Frequency sweep oscillator
 function sweep(f0:number,f1:number,dur:number,type:OscillatorType='sine',vol=0.15,delay=0){
-  if(!au)return;
+  if(!au||audioMuted)return;
   const t0=au.currentTime+delay;
   const o=au.createOscillator(),g=au.createGain();
   o.type=type;o.frequency.setValueAtTime(f0,t0);o.frequency.exponentialRampToValueAtTime(Math.max(f1,20),t0+dur);
   g.gain.setValueAtTime(vol,t0);g.gain.exponentialRampToValueAtTime(0.001,t0+dur);
   o.connect(g);g.connect(getMaster());o.start(t0);o.stop(t0+dur);
+  o.onended=()=>{o.disconnect();g.disconnect()};
 }
 
 // Filtered noise burst (lowpass/highpass)
 function noiseBurst(dur:number,vol=0.12,freqCut=2000,type:'lowpass'|'highpass'|'bandpass'='lowpass',delay=0){
-  if(!au)return;
+  if(!au||audioMuted)return;
   const t0=au.currentTime+delay;
   const buf=au.createBuffer(1,Math.ceil(au.sampleRate*dur),au.sampleRate);
   const d=buf.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
@@ -288,34 +295,36 @@ function noiseBurst(dur:number,vol=0.12,freqCut=2000,type:'lowpass'|'highpass'|'
   s.buffer=buf;flt.type=type;flt.frequency.value=freqCut;flt.Q.value=1.0;
   g.gain.setValueAtTime(vol,t0);g.gain.exponentialRampToValueAtTime(0.001,t0+dur);
   s.connect(flt);flt.connect(g);g.connect(getMaster());s.start(t0);s.stop(t0+dur);
+  s.onended=()=>{s.disconnect();flt.disconnect();g.disconnect()};
 }
 
 // Noise (unfiltered, for backward compat)
 function noise(dur:number,vol=0.08){
-  if(!au)return;
+  if(!au||audioMuted)return;
   const buf=au.createBuffer(1,Math.ceil(au.sampleRate*dur),au.sampleRate);
   const d=buf.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1);
   const s=au.createBufferSource(),g=au.createGain();
   s.buffer=buf;g.gain.setValueAtTime(vol,au.currentTime);
   g.gain.exponentialRampToValueAtTime(0.001,au.currentTime+dur);
-  s.connect(g);g.connect(getMaster());s.start();
+  s.connect(g);g.connect(getMaster());s.start();s.stop(au.currentTime+dur);
+  s.onended=()=>{s.disconnect();g.disconnect()};
 }
 
 // Sub-bass thud (sine with fast decay)
 function subBass(f:number,dur:number,vol=0.2,delay=0){
-  if(!au)return;
+  if(!au||audioMuted)return;
   const t0=au.currentTime+delay;
   const o=au.createOscillator(),g=au.createGain();
   o.type='sine';o.frequency.setValueAtTime(f,t0);o.frequency.exponentialRampToValueAtTime(20,t0+dur);
-  // Attack: quick punch then decay
   g.gain.setValueAtTime(0.001,t0);g.gain.linearRampToValueAtTime(vol,t0+0.008);
   g.gain.exponentialRampToValueAtTime(0.001,t0+dur);
   o.connect(g);g.connect(getMaster());o.start(t0);o.stop(t0+dur);
+  o.onended=()=>{o.disconnect();g.disconnect()};
 }
 
 // Distorted tone (waveshaper)
 function distTone(f:number,dur:number,type:OscillatorType='sawtooth',vol=0.12,distAmt=20,delay=0){
-  if(!au)return;
+  if(!au||audioMuted)return;
   const t0=au.currentTime+delay;
   const o=au.createOscillator(),g=au.createGain(),ws=au.createWaveShaper();
   o.type=type;o.frequency.value=f;
@@ -324,26 +333,41 @@ function distTone(f:number,dur:number,type:OscillatorType='sawtooth',vol=0.12,di
   ws.curve=curve;ws.oversample='2x';
   g.gain.setValueAtTime(vol,t0);g.gain.exponentialRampToValueAtTime(0.001,t0+dur);
   o.connect(ws);ws.connect(g);g.connect(getMaster());o.start(t0);o.stop(t0+dur);
+  o.onended=()=>{o.disconnect();ws.disconnect();g.disconnect()};
 }
 
-// Procedural BGM — pentatonic water-ink ambient loop
-let bgmInterval: number|null = null;
+// Procedural BGM — pentatonic water-ink ambient loop (Fix #9: Web Audio scheduling)
+let bgmRunning = false;
 let bgmVol = 0.04;
+let bgmNextTime = 0;
+const BGM_BEAT_INTERVAL = 0.4; // 400ms in seconds
+let bgmBeatIdx = 0;
 function startBGM(){
-  if(bgmInterval||!au)return;
-  const penta = [261.6, 293.7, 329.6, 392.0, 440.0, 523.3, 587.3, 659.3]; // C pentatonic across 2 octaves
-  let beatIdx = 0;
-  bgmInterval = window.setInterval(()=>{
-    if(!au||state==='title')return;
-    const f = penta[beatIdx % penta.length];
-    tone(f, 0.6, 'sine', bgmVol);
-    if(beatIdx%2===0) tone(f*0.5, 0.8, 'sine', bgmVol*0.5); // bass
-    if(beatIdx%4===0) tone(penta[(beatIdx+4)%penta.length], 0.4, 'triangle', bgmVol*0.6, 0.2); // harmony
-    if(random()<0.3) tone(penta[floor(random()*penta.length)]*2, 0.3, 'sine', bgmVol*0.3, 0.1); // sparkle
-    beatIdx++;
-  }, 400);
+  if(bgmRunning||!au)return;
+  bgmRunning=true;
+  bgmNextTime=au.currentTime+0.1;
+  scheduleBGMBeats();
 }
-function stopBGM(){if(bgmInterval){clearInterval(bgmInterval);bgmInterval=null}}
+function scheduleBGMBeats(){
+  if(!au||!bgmRunning)return;
+  const penta = [261.6, 293.7, 329.6, 392.0, 440.0, 523.3, 587.3, 659.3];
+  // Schedule beats ahead of time (lookahead 1 second)
+  while(bgmNextTime<au.currentTime+1.0){
+    if(state!=='title'){
+      const f = penta[bgmBeatIdx % penta.length];
+      const delay = bgmNextTime - au.currentTime;
+      tone(f, 0.6, 'sine', bgmVol, delay);
+      if(bgmBeatIdx%2===0) tone(f*0.5, 0.8, 'sine', bgmVol*0.5, delay);
+      if(bgmBeatIdx%4===0) tone(penta[(bgmBeatIdx+4)%penta.length], 0.4, 'triangle', bgmVol*0.6, delay+0.2);
+      if(random()<0.3) tone(penta[floor(random()*penta.length)]*2, 0.3, 'sine', bgmVol*0.3, delay+0.1);
+    }
+    bgmBeatIdx++;
+    bgmNextTime+=BGM_BEAT_INTERVAL;
+  }
+  // Re-schedule with setTimeout for next lookahead
+  if(bgmRunning)setTimeout(scheduleBGMBeats, 200);
+}
+function stopBGM(){bgmRunning=false}
 
 const SFX = {
   // ── UI tap: crisp click ──
@@ -511,6 +535,22 @@ const SFX = {
     tone(120,0.5,'triangle',0.05,0.7);
     noiseBurst(0.4,0.1,500,'lowpass',0.2);
   },
+  // ── Player transformation: ascending pentatonic scale + drum hit + sweep ──
+  transform(stage:number){
+    const penta=[523,659,784,1047,1318,1568];
+    const vol=0.1+stage*0.03;
+    // Ascending pentatonic arpeggio
+    penta.forEach((f,i)=>{tone(f*(1+stage*0.1),0.2,'sine',vol,i*0.06);tone(f*0.5,0.15,'triangle',vol*0.4,i*0.06)});
+    // Drum hit
+    subBass(60-stage*10,0.5+stage*0.15,0.25+stage*0.05,0.1);
+    noiseBurst(0.2+stage*0.1,0.2+stage*0.05,600,'lowpass',0.05);
+    // Rising sweep
+    sweep(200+stage*100,2000+stage*500,0.4+stage*0.1,'sine',0.08+stage*0.02,0.3);
+    // Sparkle
+    noiseBurst(0.3,0.06+stage*0.02,6000,'highpass',0.4);
+    if(stage>=2)distTone(80,0.3,'sawtooth',0.08,25,0.15);
+    if(stage>=3){tone(2093,0.5,'sine',0.12,0.5);sweep(1000,4000,0.25,'sine',0.06,0.55)}
+  },
   // ── Combo streak: escalating pitch ping (called with combo count) ──
   combo(count:number){
     const baseF=600+Math.min(count,30)*40;
@@ -557,8 +597,10 @@ function emit(x:number,y:number,count:number,cfg:{
     color=C.white,speed=[30,120],life=[0.2,0.6],size=[1,4],sizeEnd=0,
     angle:aRange=[0,TAU],gravity=0,drag=0.97,shape='circle'
   } = cfg;
-  if(particles.length>500)particles.splice(0,particles.length-500+count);
-  for(let i=0;i<count;i++){
+  // Hard cap: skip spawning if over limit (issue #5/#14)
+  if(particles.length>=400)return;
+  const spawnCount = min(count, 400 - particles.length);
+  for(let i=0;i<spawnCount;i++){
     const a=rand(aRange[0],aRange[1]),s=rand(speed[0],speed[1]);
     const c=Array.isArray(color)?pick(color):color;
     const l=rand(life[0],life[1]);
@@ -575,7 +617,8 @@ function updateParticles(dt:number){
     const p=particles[i];
     p.vx*=p.drag;p.vy*=p.drag;p.vy+=p.gravity*dt;
     p.x+=p.vx*dt;p.y+=p.vy*dt;p.rot+=p.rotSpeed*dt;p.life-=dt;
-    if(p.life<=0)particles.splice(i,1);
+    if(p.life<=0){// Swap-and-pop for O(1) removal (issue #5)
+      particles[i]=particles[particles.length-1];particles.pop();}
   }
 }
 
@@ -585,6 +628,8 @@ function drawParticles(cx:CanvasRenderingContext2D,offX:number,offY:number){
     const sz=lerp(p.size,p.sizeEnd,t);
     const alpha=p.life/p.maxLife;
     if(sz<=0||alpha<=0)continue;
+    // Fix #7: cull off-screen particles
+    if(!onScreen(p.x,p.y,offX,offY,sz*3))continue;
     cx.save();cx.translate(p.x-offX,p.y-offY);
     cx.rotate(p.rot);cx.globalAlpha=alpha;cx.fillStyle=p.color;
     switch(p.shape){
@@ -594,7 +639,8 @@ function drawParticles(cx:CanvasRenderingContext2D,offX:number,offY:number){
       case'ring':cx.strokeStyle=p.color;cx.lineWidth=max(0.5,sz*0.3);
         cx.beginPath();cx.arc(0,0,sz,0,TAU);cx.stroke();break;
       case'ink':cx.beginPath();
-        for(let i=0;i<=8;i++){const a=(i/8)*TAU;const r=sz*(0.7+random()*0.6);
+        // Fix #17: use particle rot as seed for stable shape
+        for(let i=0;i<=8;i++){const a=(i/8)*TAU;const r=sz*(0.7+((sin(p.rot*7.3+i*4.1)+1)*0.5)*0.6);
           i===0?cx.moveTo(cos(a)*r,sin(a)*r):cx.lineTo(cos(a)*r,sin(a)*r)}
         cx.closePath();cx.fill();break;
       case'text':if(p.text){
@@ -798,6 +844,7 @@ let shake = 0, shakeT = 0, freezeT = 0, slowMoT = 0, slowMoRate = 0.3, flashAlph
 // Death slow-motion state
 let deathSlowMo = 0; // countdown; when >0, game runs at 10% speed before showing death screen
 let deathSlowMoPending = false; // true = waiting for slow-mo to finish before transitioning to dead
+let deathProcessed = false; // Fix #6: guard flag prevents duplicate death SFX/particles
 // Boss entrance animation
 let bossEntranceT = 0; let bossEntranceName = ''; let bossEntranceColor = C.red;
 // Victory coin particles
@@ -806,6 +853,15 @@ let victoryCoins: CoinParticle[] = [];
 let victoryT = 0;
 // Combo screen flash tracker
 let comboFlashAlpha = 0;
+
+// ── Kill Transformation System ──
+let playerTransformStage = 0; // 0=normal, 1=墨气觉醒(100kills), 2=灵武化身(250kills), 3=山海至尊(500kills)
+let transformFreezeT = 0; // freeze timer for transformation cutscene
+let transformFlashAlpha = 0;
+let transformFlashColor = C.white;
+let transformTextT = 0; // text display timer
+let transformText = '';
+let transformTextColor = C.white;
 
 type State = 'title'|'playing'|'levelup'|'dead'|'victory'|'paused'|'shop'|'charselect'|'revive'|'share'|'leaderboard'|'daily';
 let state: State = 'title';
@@ -902,8 +958,10 @@ function getUpgradeChoices():Upgrade[]{
   }
   const pool = [...ALL_UPGRADES];
   const choices:Upgrade[]=[];
+  // Fix #11: use dailyRNG for seeded daily upgrade selection
+  const rng = isDaily ? dailyRNG : random;
   for(let i=0;i<3&&pool.length>0;i++){
-    const idx=randInt(0,pool.length-1);
+    const idx=floor(rng()*pool.length);
     choices.push(pool.splice(idx,1)[0]);
   }
   return choices;
@@ -992,12 +1050,14 @@ function spawnWave(){
     :gameTimer<180?['hunDun','biFang','taoTie','yaksha']
     :['hunDun','biFang','taoTie','jiuWei','yaksha'];
 
+  // Fix #11: use dailyRNG for seeded daily enemy spawning
+  const waveRng = isDaily ? dailyRNG : random;
   for(let i=0;i<count;i++){
-    const a=rand(0,TAU);
+    const a=waveRng()*TAU;
     // First 3 waves: spawn enemies closer so action starts immediately
     const dMin=waveNum<=3?150:350, dMax=waveNum<=3?300:500;
-    const d=rand(dMin,dMax);
-    spawnEnemy(pick(types),player.x+cos(a)*d,player.y+sin(a)*d,scale);
+    const d=dMin+waveRng()*(dMax-dMin);
+    spawnEnemy(types[floor(waveRng()*types.length)],player.x+cos(a)*d,player.y+sin(a)*d,scale);
   }
 
   // Boss every 8 waves
@@ -1033,8 +1093,11 @@ function startGame(){
   enemyBullets=[];homingBullets=[];chests=[];decals=[];achievedEvolutions.clear();pendingEvolution=null;
   waveTimer=0;waveNum=0;waveInterval=2;gameTimer=0;
   shake=0;shakeT=0;freezeT=0;slowMoT=0;slowMoRate=0.3;flashAlpha=0;
-  deathSlowMo=0;deathSlowMoPending=false;bossEntranceT=0;comboFlashAlpha=0;victoryCoins=[];victoryT=0;
+  deathSlowMo=0;deathSlowMoPending=false;deathProcessed=false;bossEntranceT=0;comboFlashAlpha=0;victoryCoins=[];victoryT=0;
+  playerTransformStage=0;transformFreezeT=0;transformFlashAlpha=0;transformTextT=0;transformText='';
   state='playing';player.invuln=1.5;
+  // Fix #11: wire up seeded RNG for daily challenge mode
+  if(isDaily){const seed=getDailySeed();meta.dailySeed=seed;dailyRNG=seededRNG(seed)}else{dailyRNG=Math.random}
   meta.runs++;saveMeta();
   Poki.gameplayStart();
   // Tutorial hint for first run
@@ -1079,6 +1142,20 @@ function doShake(amount:number,dur:number){shake=amount;shakeT=dur}
 function doFreeze(dur:number){freezeT=dur}
 function doFlash(color:string,alpha:number){flashColor=color;flashAlpha=alpha}
 
+// Fix #6: centralized death handling — prevents re-entry
+function handlePlayerDeath(){
+  if(deathProcessed)return;
+  player.hp=0;
+  if(player.revivesUsed<1&&meta.coins>=REVIVE_COST){state='revive';reviveTimer=5}
+  else{
+    deathProcessed=true;
+    deathSlowMo=1.5;deathSlowMoPending=true;
+    SFX.death();
+    emit(player.x,player.y,50,{color:[C.ink,C.red,C.white],speed:[60,250],life:[0.3,1],size:[2,8],shape:'ink',gravity:60});
+    doShake(10,0.5);doFlash(C.red,0.5);
+  }
+}
+
 function shootBullets(){
   const dir=player.facing;const count=player.bulletCount;
   const spread=player.bulletSpread;
@@ -1119,7 +1196,7 @@ function doBomb(bx:number,by:number){
 function damageEnemy(e:Enemy,dmg:number){
   const isCrit=random()<player.critChance;
   const finalDmg=isCrit?floor(dmg*player.critMult):dmg;
-  e.hp-=finalDmg;e.hitFlash=0.1;
+  e.hp-=finalDmg;e.hitFlash=0.15;
   addText(e.x+rand(-10,10),e.y-e.r-5,isCrit?`${finalDmg}!`:`${finalDmg}`,isCrit?C.gold:C.white,isCrit?20:14);
   emit(e.x,e.y,isCrit?8:3,{color:[C.ink,C.red],speed:[30,80],life:[0.1,0.3],size:[1,3],shape:'ink'});
   if(e.hp<=0)killEnemy(e);
@@ -1142,8 +1219,31 @@ function doChainLightning(fromX:number,fromY:number,remaining:number){
   }
 }
 
+function triggerTransformation(stage:number){
+  playerTransformStage=stage;
+  SFX.transform(stage);
+  const freezeDurs=[0,0.5,0.8,1.0];
+  transformFreezeT=freezeDurs[stage];
+  const colors=[C.white,C.ink,C.purpleLt,C.gold];
+  transformFlashColor=colors[stage];
+  transformFlashAlpha=stage>=3?0.8:stage>=2?0.6:0.4;
+  const texts=['','墨气觉醒!','灵武化身!','山海至尊!'];
+  transformText=texts[stage];
+  transformTextColor=colors[stage];
+  transformTextT=2.5;
+  doShake(6+stage*3,0.4+stage*0.1);
+  // Particles
+  const partColors=stage>=3?[C.gold,C.goldLt,C.white,C.red]:stage>=2?[C.purpleLt,C.blueLt,C.white]:[ C.ink,C.inkLt,C.white];
+  emit(player.x,player.y,40+stage*20,{color:partColors,speed:[80,300],life:[0.5,1.5],size:[3,10],shape:'spark'});
+  emit(player.x,player.y,20+stage*10,{color:partColors,speed:[20,80],life:[0.8,2],size:[4,12],shape:'ink',gravity:-20});
+}
+
 function killEnemy(e:Enemy){
   e.hp=0;player.kills++;
+  // Kill transformation milestones
+  if(playerTransformStage===0&&player.kills>=100)triggerTransformation(1);
+  else if(playerTransformStage===1&&player.kills>=250)triggerTransformation(2);
+  else if(playerTransformStage===2&&player.kills>=500)triggerTransformation(3);
   // Combo system
   player.combo++;player.comboTimer=2;
   if(player.combo>player.maxCombo)player.maxCombo=player.combo;
@@ -1179,7 +1279,7 @@ function killEnemy(e:Enemy){
   // Ink decal on ground — bigger splatter (doubled)
   const decalColor=ENEMY_DEFS[e.type]?.color||C.ink;
   decals.push({x:e.x,y:e.y,r:e.r*(e.isBoss?6:3)+rand(4,12),alpha:0.1,color:decalColor,rot:rand(0,TAU)});
-  if(decals.length>80)decals.shift();
+  if(decals.length>80){decals[0]=decals[decals.length-1];decals.pop()}
   const value = e.isBoss?20:e.maxHp>=30?5:e.maxHp>=15?3:1;
   gems.push({x:e.x,y:e.y,value,animT:0,magnetized:false});
   // Drop coins
@@ -1285,7 +1385,7 @@ function updatePlayer(dt:number){
 function updateBullets(dt:number){
   for(let i=bullets.length-1;i>=0;i--){
     const b=bullets[i];b.x+=b.vx*dt;b.y+=b.vy*dt;b.life-=dt;
-    if(b.life<=0){bullets.splice(i,1);continue}
+    if(b.life<=0){bullets[i]=bullets[bullets.length-1];bullets.pop();continue}
     for(const e of enemies){
       if(e.hp<=0)continue;
       if(dist(b.x,b.y,e.x,e.y)<b.r+e.r){
@@ -1299,7 +1399,7 @@ function updateBullets(dt:number){
           }
           emit(b.x,b.y,6,{color:[C.ink,C.inkLt],speed:[30,80],life:[0.1,0.25],size:[3,6],shape:'ink'});
         }
-        if(b.pierce>0){b.pierce--;b.dmg=floor(b.dmg*0.7)}else{bullets.splice(i,1)}
+        if(b.pierce>0){b.pierce--;b.dmg=floor(b.dmg*0.7)}else{bullets[i]=bullets[bullets.length-1];bullets.pop()}
         break;
       }
     }
@@ -1309,21 +1409,14 @@ function updateBullets(dt:number){
 function updateEnemyBullets(dt:number){
   for(let i=enemyBullets.length-1;i>=0;i--){
     const b=enemyBullets[i];b.x+=b.vx*dt;b.y+=b.vy*dt;b.life-=dt;
-    if(b.life<=0){enemyBullets.splice(i,1);continue}
+    if(b.life<=0){enemyBullets[i]=enemyBullets[enemyBullets.length-1];enemyBullets.pop();continue}
     if(player.invuln<=0&&dist(b.x,b.y,player.x,player.y)<b.r+player.r){
       player.hp-=b.dmg;player.invuln=0.3;
       SFX.playerHit();doShake(4,0.15);doFlash(C.red,0.2);
       addText(player.x,player.y-25,`-${b.dmg}`,C.red,18);
       emit(player.x,player.y,6,{color:[C.red],speed:[30,80],life:[0.1,0.3],size:[1,3],shape:'ink'});
-      enemyBullets.splice(i,1);
-      if(player.hp<=0){player.hp=0;
-        if(player.revivesUsed<1&&meta.coins>=REVIVE_COST){state='revive';reviveTimer=5}
-        else{// Death slow-motion: slow to 10% for 1.5s before showing death screen
-          deathSlowMo=1.5;deathSlowMoPending=true;
-          SFX.death();
-          emit(player.x,player.y,50,{color:[C.ink,C.red,C.white],speed:[60,250],life:[0.3,1],size:[2,8],shape:'ink',gravity:60});
-          doShake(10,0.5);doFlash(C.red,0.5);}
-      }
+      enemyBullets[i]=enemyBullets[enemyBullets.length-1];enemyBullets.pop();
+      if(player.hp<=0)handlePlayerDeath();
     }
   }
 }
@@ -1331,7 +1424,7 @@ function updateEnemyBullets(dt:number){
 function updateEnemies(dt:number){
   for(let i=enemies.length-1;i>=0;i--){
     const e=enemies[i];
-    if(e.hp<=0){enemies.splice(i,1);continue}
+    if(e.hp<=0){enemies[i]=enemies[enemies.length-1];enemies.pop();continue}
     e.animT+=dt;e.hitFlash=max(0,e.hitFlash-dt);
     if(e.orbitalCD>0)e.orbitalCD-=dt;
     // Boss attacks
@@ -1356,6 +1449,9 @@ function updateEnemies(dt:number){
       const dx=player.x-e.x,dy=player.y-e.y,d=dist(0,0,dx,dy);
       if(d>e.r){e.x+=dx/d*e.speed*dt;e.y+=dy/d*e.speed*dt}
     }
+    // Fix #12: clamp enemy positions to arena radius
+    const eDist=dist(0,0,e.x,e.y);
+    if(eDist>ARENA_R){const en=norm(e.x,e.y);e.x=en.x*ARENA_R;e.y=en.y*ARENA_R}
     // Hit player
     if(player.invuln<=0&&dist(e.x,e.y,player.x,player.y)<e.r+player.r){
       player.hp-=e.dmg;player.invuln=0.5;
@@ -1366,13 +1462,7 @@ function updateEnemies(dt:number){
       // Xuanwu passive: reflect 50% damage
       if(player.charId==='xuanwu'){const ref=floor(e.dmg*0.5);e.hp-=ref;e.hitFlash=0.1;
         addText(e.x,e.y-10,`反${ref}`,C.purpleLt,12);if(e.hp<=0)killEnemy(e)}
-      if(player.hp<=0){player.hp=0;
-        if(player.revivesUsed<1&&meta.coins>=REVIVE_COST){state='revive';reviveTimer=5}
-        else{// Death slow-motion
-          deathSlowMo=1.5;deathSlowMoPending=true;
-          SFX.death();
-          emit(player.x,player.y,50,{color:[C.ink,C.red,C.white],speed:[60,250],life:[0.3,1],size:[2,8],shape:'ink',gravity:60});
-          doShake(10,0.5);doFlash(C.red,0.5);}}
+      if(player.hp<=0)handlePlayerDeath();
     }
     // Aura
     if(player.auraActive&&dist(e.x,e.y,player.x,player.y)<player.auraR){
@@ -1398,13 +1488,17 @@ function updateGems(dt:number){
     const g=gems[i];g.animT+=dt;
     const d=dist(g.x,g.y,player.x,player.y);
     if(d<player.xpMagnet)g.magnetized=true;
-    if(g.magnetized){const n=norm(player.x-g.x,player.y-g.y);
-      const spd=300+200*(1-d/player.xpMagnet);g.x+=n.x*spd*dt;g.y+=n.y*spd*dt}
+    if(g.magnetized){
+      // Fix #3: demagnetize with hysteresis (2x range) to prevent flicker at boundary
+      if(d>player.xpMagnet*2.0){g.magnetized=false}
+      else{const n=norm(player.x-g.x,player.y-g.y);
+        const spd=max(0,300+200*(1-d/player.xpMagnet));g.x+=n.x*spd*dt;g.y+=n.y*spd*dt}
+    }
     if(d<20){
       if(g.isCoin){player.coins+=g.value;meta.coins+=g.value;SFX.coin();
         addText(g.x,g.y-10,`+${g.value}金`,C.gold,14)}
       else{player.xp+=g.value;SFX.pickup();checkLevelUp()}
-      gems.splice(i,1);
+      gems[i]=gems[gems.length-1];gems.pop();
     }
   }
 }
@@ -1415,7 +1509,7 @@ function updateChests(dt:number){
     // Check bullet collision
     for(let j=bullets.length-1;j>=0;j--){
       if(dist(bullets[j].x,bullets[j].y,ch.x,ch.y)<18){
-        ch.hp--;bullets.splice(j,1);
+        ch.hp--;bullets[j]=bullets[bullets.length-1];bullets.pop();
         emit(ch.x,ch.y,5,{color:[C.gold,C.paper],speed:[20,60],life:[0.1,0.3],size:[1,3],shape:'spark'});
         if(ch.hp<=0){
           // Open chest: drop coins + grant a random upgrade
@@ -1424,23 +1518,62 @@ function updateChests(dt:number){
             gems.push({x:ch.x+rand(-15,15),y:ch.y+rand(-15,15),value:randInt(2,5),animT:0,magnetized:false,isCoin:true})}
           emit(ch.x,ch.y,20,{color:[C.gold,C.goldLt,C.white],speed:[50,150],life:[0.3,0.7],size:[2,6],shape:'spark'});
           addText(ch.x,ch.y-20,'宝箱!',C.gold,20);
-          chests.splice(i,1);break;
+          chests[i]=chests[chests.length-1];chests.pop();break;
         }
       }
     }
   }
 }
 
+// Fix #13/#18: in-game name selector with preset names (no window.prompt)
+const NAME_PRESETS = ['麦洛','山海客','逐风者','墨侠','百妖猎人','夜行者','灵枪使','自定义'];
+let nameSelectActive = false;
 function promptPlayerName(){
   if(passport.playerName&&passport.playerName!=='旅行者')return;
-  changePlayerName();
+  nameSelectActive=true;
 }
 function changePlayerName(){
-  const current=passport.playerName&&passport.playerName!=='旅行者'?passport.playerName:'';
-  const name=window.prompt('给自己取个名字吧（其他玩家可见）',current);
-  if(name&&name.trim()){
-    passport.playerName=name.trim().slice(0,12);
-    savePassport();
+  nameSelectActive=true;
+}
+function handleNameSelect(idx:number){
+  if(idx<0||idx>=NAME_PRESETS.length)return;
+  if(idx===NAME_PRESETS.length-1){
+    // Last option = custom: fallback to window.prompt
+    const current=passport.playerName&&passport.playerName!=='旅行者'?passport.playerName:'';
+    const name=window.prompt('给自己取个名字吧（其他玩家可见）',current);
+    if(name&&name.trim()){passport.playerName=name.trim().slice(0,12);savePassport()}
+  }else{
+    passport.playerName=NAME_PRESETS[idx];savePassport();
+  }
+  nameSelectActive=false;
+  SFX.pickup();
+}
+function drawNameSelect(cx:CanvasRenderingContext2D){
+  // Dark overlay
+  cx.save();cx.globalAlpha=0.75;cx.fillStyle='#030310';cx.fillRect(0,0,W,H);cx.restore();
+  // Title
+  cx.save();cx.shadowBlur=12;cx.shadowColor='rgba(200,200,232,0.2)';
+  cx.font='900 24px "Noto Serif SC",serif';cx.textAlign='center';cx.textBaseline='middle';
+  cx.fillStyle=C.white;cx.globalAlpha=0.95;cx.fillText('选择名字',W/2,H*0.15);
+  cx.shadowBlur=0;cx.restore();
+  // Name buttons in 2 columns
+  const cols=2, btnW=130, btnH=36, gapX=12, gapY=10;
+  const startX=(W-(cols*btnW+(cols-1)*gapX))/2;
+  const startY=H*0.24;
+  for(let i=0;i<NAME_PRESETS.length;i++){
+    const col=i%cols, row=floor(i/cols);
+    const bx=startX+col*(btnW+gapX), by=startY+row*(btnH+gapY);
+    cx.save();
+    const btnGrad=cx.createLinearGradient(bx,by,bx,by+btnH);
+    btnGrad.addColorStop(0,'rgba(20,20,50,0.7)');btnGrad.addColorStop(1,'rgba(10,10,30,0.9)');
+    cx.globalAlpha=0.95;cx.fillStyle=btnGrad;
+    roundRect(cx,bx,by,btnW,btnH,8);cx.fill();
+    cx.strokeStyle=i===NAME_PRESETS.length-1?C.inkFaint:C.gold;cx.lineWidth=1;cx.globalAlpha=0.5;
+    roundRect(cx,bx,by,btnW,btnH,8);cx.stroke();
+    cx.globalAlpha=0.95;cx.font='700 14px "Noto Serif SC",serif';cx.textAlign='center';
+    cx.fillStyle=i===NAME_PRESETS.length-1?C.inkLt:C.white;
+    cx.fillText(NAME_PRESETS[i],bx+btnW/2,by+btnH/2+1);
+    cx.restore();
   }
 }
 function endRun(){
@@ -1450,7 +1583,7 @@ function endRun(){
   if(player.kills>meta.bestKills)meta.bestKills=player.kills;
   if(player.level>meta.bestLevel)meta.bestLevel=player.level;
   meta.coins+=player.coins;
-  meta.runs=(meta.runs||0)+1;
+  // Fix #4: meta.runs already incremented in startGame(), don't double-count
   // Add to leaderboard
   const pName=passport.playerName&&passport.playerName!=='旅行者'?passport.playerName:getChar().name;
   const entry={name:pName,kills:player.kills,time:survived,level:player.level,
@@ -1469,6 +1602,7 @@ function endRun(){
 function doRevive(){
   meta.coins-=REVIVE_COST;saveMeta();
   player.revivesUsed++;player.hp=floor(player.maxHp*0.5);player.invuln=2;
+  deathProcessed=false; // Reset guard for potential second death
   state='playing';
   SFX.levelUp();doFlash(C.gold,0.4);
   emit(player.x,player.y,40,{color:[C.gold,C.white],speed:[80,250],life:[0.4,1],size:[2,7],shape:'spark'});
@@ -1525,7 +1659,7 @@ const Poki = {
 function updateHomingBullets(dt:number){
   for(let i=homingBullets.length-1;i>=0;i--){
     const b=homingBullets[i];
-    b.life-=dt;if(b.life<=0){homingBullets.splice(i,1);continue}
+    b.life-=dt;if(b.life<=0){homingBullets[i]=homingBullets[homingBullets.length-1];homingBullets.pop();continue}
     // Home toward player
     if(b.homing){
       const a=angle(b.x,b.y,player.x,player.y);
@@ -1547,18 +1681,14 @@ function updateHomingBullets(dt:number){
       SFX.playerHit();doShake(4,0.15);doFlash(C.red,0.2);
       addText(player.x,player.y-25,`-${b.dmg}`,C.red,18);
       emit(player.x,player.y,6,{color:[C.red],speed:[30,80],life:[0.1,0.3],size:[1,3],shape:'ink'});
-      homingBullets.splice(i,1);
-      if(player.hp<=0){player.hp=0;
-        if(player.revivesUsed<1&&meta.coins>=REVIVE_COST){state='revive';reviveTimer=5}
-        else{deathSlowMo=1.5;deathSlowMoPending=true;SFX.death();
-          emit(player.x,player.y,50,{color:[C.ink,C.red,C.white],speed:[60,250],life:[0.3,1],size:[2,8],shape:'ink',gravity:60});
-          doShake(10,0.5);doFlash(C.red,0.5);}
-      }
+      homingBullets[i]=homingBullets[homingBullets.length-1];homingBullets.pop();
+      if(player.hp<=0)handlePlayerDeath();
     }
   }
 }
 
 function update(dt:number){
+  if(transformFreezeT>0){transformFreezeT-=dt;if(transformFlashAlpha>0)transformFlashAlpha=max(0,transformFlashAlpha-dt*2);return}
   if(freezeT>0){freezeT-=dt;return}
   // Death slow-motion countdown
   if(deathSlowMoPending&&deathSlowMo>0){
@@ -1569,21 +1699,39 @@ function update(dt:number){
     updateParticles(dtSlow);
     for(let i=floatTexts.length-1;i>=0;i--){
       const f=floatTexts[i];f.y+=f.vy*dtSlow;f.vy*=0.92;f.life-=dtSlow;
-      if(f.life<=0)floatTexts.splice(i,1)}
+      if(f.life<=0){floatTexts[i]=floatTexts[floatTexts.length-1];floatTexts.pop()}}
     if(deathSlowMo<=0){
       deathSlowMoPending=false;state='dead';endRun();Poki.gameplayStop();
     }
     kDown.clear();tap=false;
     return;
   }
-  const dtMod=slowMoT>0?(slowMoT-=dt,dt*slowMoRate):dt;
+  // Fix #2: proper if/else for slowMoT mutation (no ternary side-effect)
+  let dtMod: number;
+  if(slowMoT>0){slowMoT=max(0,slowMoT-dt);dtMod=dt*slowMoRate}else{dtMod=dt}
   if(flashAlpha>0)flashAlpha=max(0,flashAlpha-dtMod*3);
   if(comboFlashAlpha>0)comboFlashAlpha=max(0,comboFlashAlpha-dtMod*4);
+  if(transformFlashAlpha>0)transformFlashAlpha=max(0,transformFlashAlpha-dtMod*2);
+  if(transformTextT>0)transformTextT=max(0,transformTextT-dtMod);
   if(shakeT>0)shakeT-=dtMod;else shake=0;
   if(bossEntranceT>0)bossEntranceT=max(0,bossEntranceT-dtMod);
 
   switch(state){
     case'title':titleT+=dt;
+      // Fix #13: name select overlay intercepts taps
+      if(nameSelectActive&&tap){
+        const cols=2,btnW=130,btnH=36,gapX=12,gapY=10;
+        const startX=(W-(cols*btnW+(cols-1)*gapX))/2;
+        const startY=H*0.24;
+        let nameHandled=false;
+        for(let i=0;i<NAME_PRESETS.length;i++){
+          const col=i%cols,row=floor(i/cols);
+          const bx=startX+col*(btnW+gapX),by=startY+row*(btnH+gapY);
+          if(tapPos.x>=bx&&tapPos.x<=bx+btnW&&tapPos.y>=by&&tapPos.y<=by+btnH){handleNameSelect(i);nameHandled=true;break}
+        }
+        if(!nameHandled&&tapPos.y>H*0.7){nameSelectActive=false} // tap outside = dismiss
+        tap=false;
+      }
       // Tap regions on title screen — matched to drawTitle button layout
       // btnY0=H*0.52, btnH0=52, btnHN=38, gap=7
       if(tap){
@@ -1593,7 +1741,9 @@ function update(dt:number){
         const _b2c=_b1c+_bhn+_gap, _b2t=_b2c-_bhn/2, _b2b=_b2c+_bhn/2;
         const _b3c=_b2c+_bhn+_gap, _b3t=_b3c-_bhn/2, _b3b=_b3c+_bhn/2;
         const _b4c=_b3c+_bhn+_gap, _b4t=_b4c-_bhn/2, _b4b=_b4c+_bhn/2;
-        if(tapPos.y>H*0.43&&tapPos.y<H*0.50){SFX.uiTap();changePlayerName()} // Rename tap region
+        // Fix #16: mute button tap on title (top-left)
+        if(tapPos.x<40&&tapPos.y<40){toggleMute()}
+        else if(tapPos.y>H*0.43&&tapPos.y<H*0.50){SFX.uiTap();changePlayerName()} // Rename tap region
         else if(tapPos.y>=_b0t&&tapPos.y<=_b0b){SFX.gameStart();startGame();Poki.gameplayStart()}
         else if(tapPos.y>=_b1t&&tapPos.y<=_b1b){SFX.uiTap();state='shop'}
         else if(tapPos.y>=_b2t&&tapPos.y<=_b2b){SFX.uiTap();state='charselect'}
@@ -1608,7 +1758,7 @@ function update(dt:number){
       updateEnemies(dtMod);updateGems(dtMod);updateChests(dtMod);updateParticles(dtMod);
       for(let i=floatTexts.length-1;i>=0;i--){
         const f=floatTexts[i];f.y+=f.vy*dtMod;f.vy*=0.92;f.life-=dtMod;
-        if(f.life<=0)floatTexts.splice(i,1)}
+        if(f.life<=0){floatTexts[i]=floatTexts[floatTexts.length-1];floatTexts.pop()}}
       waveTimer+=dtMod;if(waveTimer>=waveInterval){waveTimer=0;spawnWave()}
       if(gameTimer>=GAME_DURATION){state='victory';SFX.victory();endRun();Poki.gameplayStop();
         emit(player.x,player.y,60,{color:[C.gold,C.red,C.blueLt,C.white],speed:[80,300],life:[0.5,1.5],size:[2,8],shape:'spark'});
@@ -1616,6 +1766,9 @@ function update(dt:number){
         victoryCoins=[];victoryT=0;
         for(let i=0;i<40;i++){victoryCoins.push({x:rand(20,W-20),y:rand(-200,-20),vx:rand(-20,20),vy:rand(40,120),life:8,rot:rand(0,TAU),rotSpeed:rand(-3,3)})}
       }
+      // Fix #15: pause icon tap (top-right) + Fix #16: mute icon tap (top-left HUD)
+      if(tap&&tapPos.x>W-40&&tapPos.y>56&&tapPos.y<88){SFX.uiTap();prevState='playing';state='paused'}
+      if(tap&&tapPos.x<36&&tapPos.y>56&&tapPos.y<88){toggleMute()}
       if(kDown.has('Escape')||kDown.has('KeyP')){prevState='playing';state='paused'}
       break;
     case'levelup':
@@ -1723,6 +1876,12 @@ function handleCharTap(){
 // ═══════════════════════════════════════════════════
 // RENDERING
 // ═══════════════════════════════════════════════════
+
+// Fix #7: viewport culling helper — returns true if entity is on screen
+function onScreen(ex:number,ey:number,offX:number,offY:number,margin:number):boolean{
+  const sx=ex-offX,sy=ey-offY;
+  return sx>-margin&&sx<W+margin&&sy>-margin&&sy<H+margin;
+}
 
 function drawInkCircle(cx:CanvasRenderingContext2D,x:number,y:number,r:number,fill:string,stroke:string,lineW=1.5){
   cx.save();cx.fillStyle=fill;cx.globalAlpha=0.9;
@@ -1843,7 +2002,92 @@ function drawPlayer(cx:CanvasRenderingContext2D,px:number,py:number){
     cx.shadowBlur=0;cx.restore();
   }
 
+  // ─── Transformation Visual Effects (behind player body) ───
+  if(playerTransformStage>=1){
+    cx.save();cx.translate(px,py+bob);
+    // Ink energy particles orbiting the player
+    const orbCount=playerTransformStage>=3?6:playerTransformStage>=2?5:3;
+    const orbR=playerTransformStage>=3?28:playerTransformStage>=2?24:20;
+    for(let oi=0;oi<orbCount;oi++){
+      const oa=p.animT*(2+playerTransformStage*0.5)+oi*(TAU/orbCount);
+      const ox=cos(oa)*orbR,oy=sin(oa)*orbR*0.6;
+      const orbAlpha=0.4+sin(p.animT*4+oi)*0.2;
+      cx.globalAlpha=orbAlpha;
+      const orbSize=playerTransformStage>=3?3.5:playerTransformStage>=2?3:2.5;
+      if(playerTransformStage>=3){
+        // Golden particles for stage 3
+        const gGrad=cx.createRadialGradient(ox,oy,0,ox,oy,orbSize*2);
+        gGrad.addColorStop(0,C.goldLt);gGrad.addColorStop(0.5,C.gold);gGrad.addColorStop(1,'rgba(240,184,64,0)');
+        cx.fillStyle=gGrad;cx.beginPath();cx.arc(ox,oy,orbSize*2,0,TAU);cx.fill();
+      }else if(playerTransformStage>=2){
+        // Purple/blue particles for stage 2
+        cx.fillStyle=oi%2===0?C.purpleLt:C.blueLt;
+        cx.beginPath();cx.arc(ox,oy,orbSize,0,TAU);cx.fill();
+      }else{
+        // Dark ink particles for stage 1
+        cx.fillStyle=C.ink;
+        cx.beginPath();
+        for(let si=0;si<=6;si++){const sa=(si/6)*TAU;const sr=orbSize*(0.7+sin(sa*3+oi+p.animT*2)*0.3);
+          si===0?cx.moveTo(ox+cos(sa)*sr,oy+sin(sa)*sr):cx.lineTo(ox+cos(sa)*sr,oy+sin(sa)*sr)}
+        cx.closePath();cx.fill();
+      }
+    }
+    cx.restore();
+  }
+  // Energy wings (stage 2+)
+  if(playerTransformStage>=2){
+    cx.save();cx.translate(px,py+bob);
+    const wingScale=playerTransformStage>=3?1.4:1.0;
+    const wingAlpha=playerTransformStage>=3?0.5:0.35;
+    cx.globalAlpha=wingAlpha+sin(p.animT*3)*0.1;
+    for(const dir of [-1,1]){
+      cx.save();
+      if(playerTransformStage>=3){
+        // Full ink-brush stroke wings with gradient
+        cx.lineWidth=3;cx.lineCap='round';
+        const wingGrad=cx.createLinearGradient(0,0,dir*35*wingScale,-20*wingScale);
+        wingGrad.addColorStop(0,C.gold);wingGrad.addColorStop(0.5,C.goldLt);wingGrad.addColorStop(1,'rgba(240,184,64,0)');
+        cx.strokeStyle=wingGrad;
+        cx.beginPath();cx.moveTo(dir*4,-2);
+        cx.quadraticCurveTo(dir*20*wingScale,-18*wingScale+sin(p.animT*4)*3,dir*35*wingScale,-12*wingScale+sin(p.animT*3+dir)*4);
+        cx.stroke();
+        // Second stroke
+        cx.globalAlpha=(wingAlpha-0.1)+sin(p.animT*3.5)*0.08;cx.lineWidth=2;
+        cx.beginPath();cx.moveTo(dir*5,2);
+        cx.quadraticCurveTo(dir*18*wingScale,-14*wingScale+cos(p.animT*3.5)*3,dir*30*wingScale,-8*wingScale+sin(p.animT*2.5+dir)*3);
+        cx.stroke();
+        // Trailing particles from wing tips
+        cx.globalAlpha=0.3;cx.fillStyle=C.goldLt;
+        cx.beginPath();cx.arc(dir*35*wingScale+sin(p.animT*5)*2,-12*wingScale+cos(p.animT*4)*2,2,0,TAU);cx.fill();
+      }else{
+        // Stage 2: curved energy lines
+        cx.lineWidth=2;cx.lineCap='round';
+        const wingGrad2=cx.createLinearGradient(0,0,dir*28*wingScale,-16*wingScale);
+        wingGrad2.addColorStop(0,C.purpleLt);wingGrad2.addColorStop(1,'rgba(176,152,224,0)');
+        cx.strokeStyle=wingGrad2;
+        cx.beginPath();cx.moveTo(dir*4,-2);
+        cx.quadraticCurveTo(dir*16*wingScale,-14*wingScale+sin(p.animT*4)*2,dir*28*wingScale,-10*wingScale+sin(p.animT*3)*3);
+        cx.stroke();
+      }
+      cx.restore();
+    }
+    cx.restore();
+  }
+  // Golden aura outline (stage 3)
+  if(playerTransformStage>=3){
+    cx.save();cx.translate(px,py+bob);
+    cx.shadowBlur=20;cx.shadowColor='rgba(240,184,64,0.5)';
+    cx.globalAlpha=0.25+sin(p.animT*3)*0.1;
+    cx.strokeStyle=C.gold;cx.lineWidth=2.5;
+    const auraR2=p.r*1.8;
+    cx.beginPath();cx.arc(0,0,auraR2,0,TAU);cx.stroke();
+    cx.shadowBlur=0;cx.restore();
+  }
+
+  // Apply transformation scale
+  const tScale=playerTransformStage>=3?1.45:playerTransformStage>=2?1.30:playerTransformStage>=1?1.15:1.0;
   cx.save();cx.translate(px,py);
+  if(tScale!==1.0)cx.scale(tScale,tScale);
 
   // ─── Scarf (enhanced: thicker, flowing, gradient) ───
   cx.save();
@@ -1907,6 +2151,35 @@ function drawPlayer(cx:CanvasRenderingContext2D,px:number,py:number){
   cx.beginPath();cx.arc(ex-3.5,ey-2,0.7,0,TAU);cx.fill();
   cx.beginPath();cx.arc(ex+2.5,ey-2,0.7,0,TAU);cx.fill();
 
+  // ─── Transformation: Glowing eyes (stage 2+) ───
+  if(playerTransformStage>=2){
+    cx.save();
+    const eyeGlowColor=playerTransformStage>=3?C.gold:C.purpleLt;
+    cx.shadowBlur=8;cx.shadowColor=eyeGlowColor;
+    cx.globalAlpha=0.7+sin(p.animT*6)*0.2;
+    cx.fillStyle=eyeGlowColor;
+    cx.beginPath();cx.arc(ex-3,ey-1,2.2,0,TAU);cx.fill();
+    cx.beginPath();cx.arc(ex+3,ey-1,2.2,0,TAU);cx.fill();
+    cx.shadowBlur=0;cx.restore();
+  }
+  // ─── Transformation: Golden crown/halo (stage 3) ───
+  if(playerTransformStage>=3){
+    cx.save();
+    cx.shadowBlur=12;cx.shadowColor='rgba(240,184,64,0.6)';
+    cx.globalAlpha=0.6+sin(p.animT*2)*0.15;
+    cx.strokeStyle=C.gold;cx.lineWidth=1.5;
+    // Halo ring above head
+    cx.beginPath();cx.ellipse(0,-p.r-6+bob,8,3,0,0,TAU);cx.stroke();
+    // Crown points
+    cx.globalAlpha=0.5+sin(p.animT*2.5)*0.1;cx.fillStyle=C.goldLt;
+    for(let ci=0;ci<5;ci++){
+      const ca=-PI/2+((ci-2)/4)*0.8;
+      const cpx=cos(ca)*9,cpy=-p.r-8+bob+sin(ca)*2;
+      cx.beginPath();cx.moveTo(cpx,cpy);cx.lineTo(cpx-1.5,cpy+3);cx.lineTo(cpx+1.5,cpy+3);cx.closePath();cx.fill();
+    }
+    cx.shadowBlur=0;cx.restore();
+  }
+
   // ─── Hair (enhanced with multiple strands) ───
   cx.strokeStyle='#0a0a18';cx.lineWidth=2.5;cx.lineCap='round';cx.globalAlpha=0.85;
   cx.beginPath();cx.moveTo(-2,-p.r+bob);
@@ -1921,9 +2194,11 @@ function drawPlayer(cx:CanvasRenderingContext2D,px:number,py:number){
     cx.shadowBlur=15;cx.shadowColor='rgba(240,184,64,0.8)';
     cx.globalAlpha=0.7;
     const mfx=cos(p.facing)*18,mfy=sin(p.facing)*18+bob;
-    const mfGrad=cx.createRadialGradient(mfx,mfy,0,mfx,mfy,6+random()*2);
+    // Fix #17: use shootTimer for stable muzzle flash size
+    const mfSize=6+((p.shootTimer/p.shootCD)*2);
+    const mfGrad=cx.createRadialGradient(mfx,mfy,0,mfx,mfy,mfSize);
     mfGrad.addColorStop(0,C.white);mfGrad.addColorStop(0.4,C.gold);mfGrad.addColorStop(1,'rgba(240,184,64,0)');
-    cx.fillStyle=mfGrad;cx.beginPath();cx.arc(mfx,mfy,6+random()*2,0,TAU);cx.fill();
+    cx.fillStyle=mfGrad;cx.beginPath();cx.arc(mfx,mfy,mfSize,0,TAU);cx.fill();
     cx.shadowBlur=0;cx.restore();
   }
   cx.restore();cx.globalAlpha=1;
@@ -1931,7 +2206,8 @@ function drawPlayer(cx:CanvasRenderingContext2D,px:number,py:number){
 
 function drawEnemy(cx:CanvasRenderingContext2D,e:Enemy,offX:number,offY:number){
   const ex=e.x-offX,ey=e.y-offY;const def=ENEMY_DEFS[e.type]||ENEMY_DEFS.hunDun;const bob=sin(e.animT*3)*1.5;
-  if(e.hitFlash>0)cx.save();
+  // Fix #1: hit flash with globalCompositeOperation 'lighter' for visible brighten effect
+  if(e.hitFlash>0){cx.save();cx.globalCompositeOperation='lighter'}
 
   // ─── Ground shadow for all enemies ───
   cx.save();
@@ -1978,7 +2254,7 @@ function drawEnemy(cx:CanvasRenderingContext2D,e:Enemy,offX:number,offY:number){
         const eAngle=i*2.1+e.animT*0.3;
         const eex=ex+cos(eAngle)*e.r*0.3,eey=ey+sin(eAngle)*e.r*0.25+bob;
         const eyeSz=e.isBoss?3.5:1.8;
-        cx.save();cx.shadowBlur=6;cx.shadowColor='rgba(224,48,80,0.6)';
+        cx.save();if(e.isBoss){cx.shadowBlur=6;cx.shadowColor='rgba(224,48,80,0.6)'} // Fix #8: shadowBlur only for bosses
         cx.fillStyle=C.red;cx.globalAlpha=0.9;
         cx.beginPath();cx.arc(eex,eey,eyeSz,0,TAU);cx.fill();
         cx.fillStyle=C.white;cx.globalAlpha=0.5;
@@ -2154,7 +2430,7 @@ function drawEnemy(cx:CanvasRenderingContext2D,e:Enemy,offX:number,offY:number){
       cx.fillText(`${floor(e.hp)}`,ex,by-3);cx.shadowBlur=0;}
     cx.restore();
   }
-  if(e.hitFlash>0)cx.restore();cx.globalAlpha=1;
+  if(e.hitFlash>0){cx.restore()}cx.globalAlpha=1;
 }
 
 // Helper: rounded rectangle path
@@ -2193,7 +2469,8 @@ function drawBullet(cx:CanvasRenderingContext2D,b:Bullet,offX:number,offY:number
     trailGrad.addColorStop(0,'rgba(200,200,232,0)');trailGrad.addColorStop(0.5,'rgba(200,200,232,0.2)');trailGrad.addColorStop(1,C.inkLt);
     cx.globalAlpha=0.4;cx.fillStyle=trailGrad;cx.beginPath();cx.ellipse(-5,0,10,2.5,0,0,TAU);cx.fill();
     // Bullet body with gradient
-    cx.save();cx.shadowBlur=6;cx.shadowColor='rgba(200,200,232,0.4)';
+    // Fix #8: removed shadowBlur from normal bullets for performance
+    cx.save();
     const bGrad=cx.createRadialGradient(-1,-0.5,0,0,0,b.r+1);
     bGrad.addColorStop(0,C.white);bGrad.addColorStop(0.3,C.inkLt);bGrad.addColorStop(1,C.ink);
     cx.globalAlpha=0.95;cx.fillStyle=bGrad;cx.beginPath();cx.ellipse(0,0,b.r+1.5,b.r*0.7,0,0,TAU);cx.fill();
@@ -2210,8 +2487,7 @@ function drawBullet(cx:CanvasRenderingContext2D,b:Bullet,offX:number,offY:number
 function drawEnemyBullet(cx:CanvasRenderingContext2D,b:EnemyBullet,offX:number,offY:number){
   const bx=b.x-offX,by=b.y-offY;
   cx.save();
-  // Outer glow
-  cx.shadowBlur=10;cx.shadowColor='rgba(224,48,80,0.4)';
+  // Fix #8: removed shadowBlur from enemy bullets for performance
   const ebGlow=cx.createRadialGradient(bx,by,0,bx,by,b.r*2);
   ebGlow.addColorStop(0,'rgba(255,104,136,0.3)');ebGlow.addColorStop(1,'rgba(0,0,0,0)');
   cx.globalAlpha=0.5;cx.fillStyle=ebGlow;cx.beginPath();cx.arc(bx,by,b.r*2,0,TAU);cx.fill();
@@ -2221,7 +2497,7 @@ function drawEnemyBullet(cx:CanvasRenderingContext2D,b:EnemyBullet,offX:number,o
   cx.globalAlpha=0.9;cx.fillStyle=ebBody;cx.beginPath();cx.arc(bx,by,b.r,0,TAU);cx.fill();
   // Core
   cx.globalAlpha=0.4;cx.fillStyle=C.white;cx.beginPath();cx.arc(bx-b.r*0.2,by-b.r*0.2,b.r*0.3,0,TAU);cx.fill();
-  cx.shadowBlur=0;cx.restore();
+  cx.restore();
 }
 
 function drawGem(cx:CanvasRenderingContext2D,g:Gem,offX:number,offY:number){
@@ -2230,8 +2506,7 @@ function drawGem(cx:CanvasRenderingContext2D,g:Gem,offX:number,offY:number){
     // Metallic coin with spinning effect + glow
     const sz=5.5;const spinW=abs(cos(g.animT*5))*sz;
     cx.save();
-    cx.shadowBlur=8;cx.shadowColor='rgba(240,184,64,0.5)';
-    // Glow
+    // Fix #8: removed shadowBlur from coins for performance
     const coinGlow=cx.createRadialGradient(gx,gy,0,gx,gy,sz+5);
     coinGlow.addColorStop(0,'rgba(240,184,64,0.25)');coinGlow.addColorStop(1,'rgba(0,0,0,0)');
     cx.globalAlpha=0.5+sin(g.animT*3)*0.15;cx.fillStyle=coinGlow;cx.beginPath();cx.arc(gx,gy,sz+5,0,TAU);cx.fill();
@@ -2244,14 +2519,14 @@ function drawGem(cx:CanvasRenderingContext2D,g:Gem,offX:number,offY:number){
     // Shine highlight
     if(spinW>3){cx.globalAlpha=0.4;cx.fillStyle=C.white;
       cx.beginPath();cx.ellipse(gx-1,gy-1.5,1.5,2.5,0,0,TAU);cx.fill();}
-    cx.shadowBlur=0;cx.restore();return;
+    cx.restore();return;
   }
   // Experience gem with radial gradient + pulsing glow + particle orbit
   const sz=g.value>=5?6.5:g.value>=3?5.5:4.5;
   const gemColor=g.value>=5?C.gold:g.value>=3?C.blueLt:C.greenLt;
   const gemColorDk=g.value>=5?C.goldDk:g.value>=3?C.blue:C.green;
   cx.save();
-  cx.shadowBlur=10;cx.shadowColor=gemColor;
+  // Fix #8: removed shadowBlur from XP gems for performance
   // Pulsing outer glow
   const pulse=0.2+sin(g.animT*4)*0.1;
   const gemGlow=cx.createRadialGradient(gx,gy,0,gx,gy,sz+6);
@@ -2269,7 +2544,7 @@ function drawGem(cx:CanvasRenderingContext2D,g:Gem,offX:number,offY:number){
   const orbA=g.animT*6;
   cx.globalAlpha=0.4;cx.fillStyle=C.white;
   cx.beginPath();cx.arc(gx+cos(orbA)*sz*1.2,gy+sin(orbA)*sz*1.2,1,0,TAU);cx.fill();
-  cx.shadowBlur=0;cx.restore();
+  cx.restore();
 }
 
 function drawChest(cx:CanvasRenderingContext2D,ch:Chest,offX:number,offY:number){
@@ -2477,9 +2752,18 @@ function drawHUD(cx:CanvasRenderingContext2D){
     cx.beginPath();cx.arc(moveTouch.sx+moveJoy.x*40,moveTouch.sy+moveJoy.y*40,14,0,TAU);cx.fill();cx.restore()}
   // Minimap
   drawMinimap(cx);
-  // Pause hint
-  cx.font='400 9px sans-serif';cx.textAlign='left';cx.fillStyle=C.inkFaint;cx.globalAlpha=0.3;
-  cx.fillText('ESC暂停',4,H-6);cx.globalAlpha=1;
+  // Fix #15: Pause icon (top-right, tappable)
+  cx.save();cx.globalAlpha=0.35;cx.fillStyle=C.inkLt;
+  roundRect(cx,W-36,60,24,24,4);cx.fill();
+  cx.globalAlpha=0.7;cx.fillStyle=C.white;
+  cx.fillRect(W-32,65,5,14);cx.fillRect(W-23,65,5,14);
+  cx.restore();
+  // Fix #16: Mute icon in HUD
+  cx.save();cx.globalAlpha=0.35;cx.fillStyle=C.inkLt;
+  roundRect(cx,8,60,24,24,4);cx.fill();
+  cx.globalAlpha=0.7;cx.font='700 14px sans-serif';cx.textAlign='center';cx.fillStyle=C.white;
+  cx.fillText(audioMuted?'🔇':'🔊',20,76);
+  cx.restore();
 }
 
 // ─── Title screen demon silhouettes ───
@@ -2519,8 +2803,8 @@ function drawTitle(cx:CanvasRenderingContext2D){
 
   // ─── Demon silhouettes passing across screen ───
   for(const d of titleDemons){
-    d.x+=d.speed*0.016;
-    if(d.x>W+100){d.x=-50-random()*100;d.y=H*0.45+random()*H*0.25}
+    d.x+=d.speed*titleDt;
+    if(d.x>W+100){d.x=-50-d.size*2;d.y=H*0.45+(sin(d.size*3.7+d.speed*1.3)+1)*0.5*H*0.25}
     cx.save();cx.globalAlpha=d.alpha;cx.fillStyle='#0a0a20';
     cx.translate(d.x,d.y);
     // Simple demon silhouette shapes
@@ -2544,8 +2828,8 @@ function drawTitle(cx:CanvasRenderingContext2D){
 
   // ─── Floating particles ───
   for(const p of titleParts){
-    p.x+=p.vx*0.016;p.y+=p.vy*0.016;p.life-=0.016;
-    if(p.life<=0||p.y<-10){p.x=random()*W;p.y=H+10;p.life=5+random()*5;p.vy=-5-random()*10}
+    p.x+=p.vx*titleDt;p.y+=p.vy*titleDt;p.life-=titleDt;
+    if(p.life<=0||p.y<-10){p.x=(sin(p.alpha*73.1+p.size*11.3)+1)*0.5*W;p.y=H+10;p.life=5+(sin(p.alpha*17.7)+1)*2.5;p.vy=-5-(sin(p.size*31.1)+1)*5}
     cx.save();cx.globalAlpha=p.alpha*min(1,p.life);cx.fillStyle=C.inkFaint;
     cx.beginPath();cx.arc(p.x,p.y,p.size,0,TAU);cx.fill();cx.restore();
   }
@@ -2662,6 +2946,12 @@ function drawTitle(cx:CanvasRenderingContext2D){
   cx.font='400 11px "Noto Serif SC",serif';cx.textAlign='center';cx.fillStyle=C.inkFaint;cx.globalAlpha=0.45;
   cx.fillText(`${meta.runs}局 · ${meta.totalKills}斩 · 最高${meta.bestKills}斩`,W/2,H*0.90);
 
+  // Fix #16: Mute button on title screen (top-left)
+  cx.save();cx.globalAlpha=0.35;cx.fillStyle=C.inkLt;
+  roundRect(cx,8,8,28,28,6);cx.fill();
+  cx.globalAlpha=0.7;cx.font='700 16px sans-serif';cx.textAlign='center';cx.fillStyle=C.white;
+  cx.fillText(audioMuted?'🔇':'🔊',22,26);
+  cx.restore();
   // ─── Credits with subtle styling ───
   cx.font='400 10px "Noto Serif SC",serif';cx.fillStyle=C.inkFaint;cx.globalAlpha=0.3;
   cx.fillText('JoyBoy Games × 水墨山海',W/2,H*0.935);
@@ -3072,16 +3362,33 @@ function drawLeaderboard(cx:CanvasRenderingContext2D){
 
 function render(){
   ctx.clearRect(0,0,W,H);
-  if(state==='title'){drawTitle(ctx);return}
+  if(state==='title'){drawTitle(ctx);if(nameSelectActive)drawNameSelect(ctx);return}
   if(state==='shop'){drawShop(ctx);return}
   if(state==='charselect'){drawCharSelect(ctx);return}
   if(state==='leaderboard'){drawLeaderboard(ctx);return}
   // Game world
   const offX=player.x-W/2,offY=player.y-H/2;
-  // Screen shake with independent H/V randomness
-  const sx=shake>0?(random()-0.5)*shake*2.2:0,sy=shake>0?(random()-0.5)*shake*1.8:0;
+  // Screen shake with deterministic sin/cos (no Math.random in render)
+  const sx=shake>0?sin(shakeT*73.1)*shake*1.1:0,sy=shake>0?cos(shakeT*91.7)*shake*0.9:0;
   ctx.save();ctx.translate(sx,sy);
   ctx.drawImage(paperBuf,0,0);
+  // Transformation background palette shift
+  if(playerTransformStage>=1){
+    ctx.save();
+    if(playerTransformStage>=3){
+      // Golden dawn palette — amber horizon glow
+      const dawnGrad=ctx.createLinearGradient(0,0,0,H);
+      dawnGrad.addColorStop(0,'rgba(20,15,40,0.15)');dawnGrad.addColorStop(0.6,'rgba(40,25,10,0.12)');dawnGrad.addColorStop(1,'rgba(60,40,10,0.18)');
+      ctx.fillStyle=dawnGrad;ctx.globalAlpha=1;ctx.fillRect(0,0,W,H);
+    }else if(playerTransformStage>=2){
+      // Deep indigo with more stars feel
+      ctx.globalAlpha=0.08;ctx.fillStyle='#100830';ctx.fillRect(0,0,W,H);
+    }else{
+      // Subtle purple tint for stage 1
+      ctx.globalAlpha=0.05;ctx.fillStyle='#200830';ctx.fillRect(0,0,W,H);
+    }
+    ctx.restore();
+  }
   drawStars(ctx, gameTimer);
   // Floating ink-wash clouds with parallax
   drawInkClouds(ctx, gameTimer, offX, offY);
@@ -3124,8 +3431,9 @@ function render(){
   vig.addColorStop(0.7,'rgba(6,6,26,0.15)');
   vig.addColorStop(1,'rgba(6,6,26,0.45)');
   ctx.fillStyle=vig;ctx.fillRect(0,0,W,H);ctx.restore();
-  // Ink decals (ground stains from kills)
+  // Ink decals (ground stains from kills) — with viewport culling (#7)
   for(const d of decals){
+    if(!onScreen(d.x,d.y,offX,offY,d.r*2))continue;
     ctx.save();ctx.translate(d.x-offX,d.y-offY);ctx.rotate(d.rot);
     ctx.globalAlpha=d.alpha;ctx.fillStyle=d.color;
     ctx.beginPath();
@@ -3134,15 +3442,17 @@ function render(){
     ctx.closePath();ctx.fill();ctx.restore();
   }
   // Chests
-  for(const ch of chests)drawChest(ctx,ch,offX,offY);
+  // Fix #7: all entity rendering uses viewport culling
+  for(const ch of chests){if(onScreen(ch.x,ch.y,offX,offY,40))drawChest(ctx,ch,offX,offY)}
   // Gems
-  for(const g of gems)drawGem(ctx,g,offX,offY);
+  for(const g of gems){if(onScreen(g.x,g.y,offX,offY,20))drawGem(ctx,g,offX,offY)}
   // Bullets
-  for(const b of bullets)drawBullet(ctx,b,offX,offY);
+  for(const b of bullets){if(onScreen(b.x,b.y,offX,offY,20))drawBullet(ctx,b,offX,offY)}
   // Enemy bullets
-  for(const b of enemyBullets)drawEnemyBullet(ctx,b,offX,offY);
+  for(const b of enemyBullets){if(onScreen(b.x,b.y,offX,offY,20))drawEnemyBullet(ctx,b,offX,offY)}
   // Homing bullets (enhanced with glow + trail)
   for(const b of homingBullets){
+    if(!onScreen(b.x,b.y,offX,offY,30))continue;
     const bx=b.x-offX,by=b.y-offY;
     ctx.save();
     ctx.shadowBlur=15;ctx.shadowColor='rgba(224,48,80,0.5)';
@@ -3160,7 +3470,7 @@ function render(){
   }
   // Enemies
   enemies.sort((a,b)=>a.y-b.y);
-  for(const e of enemies)drawEnemy(ctx,e,offX,offY);
+  for(const e of enemies){if(onScreen(e.x,e.y,offX,offY,e.r*3+30))drawEnemy(ctx,e,offX,offY)}
   // Player
   drawPlayer(ctx,W/2+sx,H/2+sy);
   // Particles
@@ -3178,6 +3488,34 @@ function render(){
   drawHUD(ctx);
   // Combo flash overlay
   if(comboFlashAlpha>0){ctx.save();ctx.globalAlpha=comboFlashAlpha;ctx.fillStyle=C.gold;ctx.fillRect(0,0,W,H);ctx.restore()}
+  // Transformation flash overlay
+  if(transformFlashAlpha>0){ctx.save();ctx.globalAlpha=transformFlashAlpha;ctx.fillStyle=transformFlashColor;ctx.fillRect(0,0,W,H);ctx.restore()}
+  // Transformation calligraphy text
+  if(transformTextT>0&&transformText){
+    ctx.save();
+    const ttAlpha=transformTextT>2?1:transformTextT/2;
+    const ttScale=transformTextT>2.2?1+(2.5-transformTextT)*3:1;
+    ctx.globalAlpha=ttAlpha*0.95;
+    ctx.shadowBlur=25;ctx.shadowColor=playerTransformStage>=3?'rgba(240,184,64,0.6)':playerTransformStage>=2?'rgba(176,152,224,0.5)':'rgba(200,200,232,0.4)';
+    ctx.font=`900 ${floor(40*min(ttScale,1.5))}px "Noto Serif SC",serif`;ctx.textAlign='center';ctx.textBaseline='middle';
+    // Shadow
+    ctx.fillStyle='#000000';ctx.globalAlpha=ttAlpha*0.4;
+    ctx.fillText(transformText,W/2+3,H*0.35+3);
+    // Main text
+    ctx.fillStyle=transformTextColor;ctx.globalAlpha=ttAlpha*0.95;
+    ctx.fillText(transformText,W/2,H*0.35);
+    // Highlight pass
+    ctx.globalAlpha=ttAlpha*0.2;ctx.fillStyle=C.white;
+    ctx.fillText(transformText,W/2-1,H*0.35-1);
+    // Screen pulse ring
+    if(transformTextT>1.8){
+      const ringAlpha=(transformTextT-1.8)*1.4;
+      const ringR=(2.5-transformTextT)*300;
+      ctx.globalAlpha=ringAlpha*0.3;ctx.strokeStyle=transformTextColor;ctx.lineWidth=3;
+      ctx.beginPath();ctx.arc(W/2,H*0.35,ringR,0,TAU);ctx.stroke();
+    }
+    ctx.shadowBlur=0;ctx.restore();
+  }
   // Overlays
   // Large combo counter with glow effect
   if(state==='playing'&&player.combo>=5){
@@ -3229,10 +3567,12 @@ function render(){
 // GAME LOOP
 // ═══════════════════════════════════════════════════
 
+let titleDt = 0.016; // Fix #17: actual dt for title animations
 let lastT=performance.now();
 function loop(now:number){
   requestAnimationFrame(loop);
   const dt=min((now-lastT)/1000,0.1);lastT=now;
+  titleDt=dt; // Fix #17: pass actual dt to title screen animations
   update(dt);render();
 }
 requestAnimationFrame(loop);
