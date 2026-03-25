@@ -1,0 +1,5 @@
+mem_log_cc_joyboy.md
+node_modules/
+dist/
+*.local
+.DS_Store

@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Melo's Quest Thumbnail Generator</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Georgia', serif;
+    background: #1a1a1a;
+    color: #e0d8c8;
+    padding: 20px;
+  }
+  h1 { text-align: center; margin-bottom: 8px; font-size: 28px; color: #f0e6d0; }
+  .subtitle { text-align: center; margin-bottom: 24px; color: #8a7e6a; font-size: 14px; }
+  .controls {
+    text-align: center;
+    margin-bottom: 24px;
+  }
+  .controls button {
+    background: #8b4513;
+    color: #f0e6d0;
+    border: 2px solid #a0522d;
+    padding: 10px 28px;
+    font-size: 16px;
+    font-family: 'Georgia', serif;
+    cursor: pointer;
+    border-radius: 4px;
+    margin: 0 8px;
+  }
+  .controls button:hover { background: #a0522d; }
+  .game-section {
+    margin-bottom: 40px;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 20px;
+    background: #222;
+  }
+  .game-section h2 {
+    margin-bottom: 12px;
+    color: #d4c4a0;
+    font-size: 20px;
+  }
+  .canvas-row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+  }
+  .canvas-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .canvas-item label {
+    font-size: 12px;
+    color: #8a7e6a;
+    margin-bottom: 4px;
+  }
+  .canvas-item canvas {
+    border: 1px solid #444;
+    max-width: 320px;
+    height: auto;
+  }
+  .canvas-item button {
+    margin-top: 6px;
+    background: #333;
+    color: #c0b8a0;
+    border: 1px solid #555;
+    padding: 4px 12px;
+    font-size: 11px;
+    cursor: pointer;
+    border-radius: 3px;
+  }
+  .canvas-item button:hover { background: #444; }
+</style>
+</head>
+<body>
+
+<h1>Melo's Quest - Thumbnail Generator</h1>
+<p class="subtitle">Ink-wash style thumbnails for all 5 games (Poki 512x512, CrazyGames 800x450, itch.io 630x500)</p>
+
+<div class="controls">
+  <button onclick="renderAll()">Render All</button>
+  <button onclick="downloadAll()">Download All PNGs</button>
+</div>
+
+<div id="container"></div>
+
+<script>
+// ── Game Definitions ──
+const GAMES = [
+  {
+    id: 'shanhai-survivors',
+    title: "Melo's Quest 1",
+    subtitle: '山海幸存者',
+    tagline: 'Shanhai Survivors',
+    accent: '#c0392b',       // red
+    accentLight: '#e74c3c',
+    drawIcon: drawShanhai,
+  },
+  {
+    id: 'cloud-leap',
+    title: "Melo's Quest 2",
+    subtitle: '云端纵跃',
+    tagline: 'Cloud Leap',
+    accent: '#2471a3',       // blue
+    accentLight: '#3498db',
+    drawIcon: drawCloudLeap,
+  },
+  {
+    id: 'ricochet-scroll',
+    title: "Melo's Quest 3",
+    subtitle: '弹珠古卷',
+    tagline: 'Ricochet Scroll',
+    accent: '#1e8449',       // green
+    accentLight: '#27ae60',
+    drawIcon: drawRicochet,
+  },
+  {
+    id: 'spirit-serpent',
+    title: "Melo's Quest 4",
+    subtitle: '灵蛇诡道',
+    tagline: 'Spirit Serpent',
+    accent: '#6c3483',       // purple
+    accentLight: '#8e44ad',
+    drawIcon: drawSpiritSerpent,
+  },
+  {
+    id: 'fate-cards',
+    title: "Melo's Quest 5",
+    subtitle: '命运五牌',
+    tagline: 'Fate Cards',
+    accent: '#b7950b',       // gold
+    accentLight: '#d4ac0d',
+    drawIcon: drawFateCards,
+  },
+];
+
+const SIZES = [
+  { label: '512x512 (Poki)', w: 512, h: 512, suffix: 'poki' },
+  { label: '800x450 (CrazyGames)', w: 800, h: 450, suffix: 'cover' },
+  { label: '630x500 (itch.io)', w: 630, h: 500, suffix: 'itchio' },
+];
+
+// ── Seeded RNG for reproducible noise ──
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ── Drawing Utilities ──
+
+function fillParchment(ctx, w, h, seed) {
+  // Base warm parchment
+  const grad = ctx.createRadialGradient(w/2, h/2, 0, w/2, h/2, Math.max(w,h)*0.7);
+  grad.addColorStop(0, '#f5e6c8');
+  grad.addColorStop(0.6, '#e8d5a8');
+  grad.addColorStop(1, '#d4c090');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+
+  // Rice paper noise texture
+  const rng = mulberry32(seed || 42);
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const n = (rng() - 0.5) * 30;
+    data[i]   += n;
+    data[i+1] += n;
+    data[i+2] += n - 5;
+  }
+  ctx.putImageData(imgData, 0, 0);
+
+  // Subtle fiber streaks
+  ctx.save();
+  ctx.globalAlpha = 0.03;
+  ctx.strokeStyle = '#8b7355';
+  for (let i = 0; i < 40; i++) {
+    ctx.beginPath();
+    const y = rng() * h;
+    ctx.moveTo(0, y);
+    ctx.bezierCurveTo(w*0.3, y + (rng()-0.5)*20, w*0.7, y + (rng()-0.5)*20, w, y + (rng()-0.5)*10);
+    ctx.lineWidth = rng() * 1.5 + 0.5;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawVignette(ctx, w, h, accent) {
+  // Dark ink vignette edges
+  const grad = ctx.createRadialGradient(w/2, h/2, Math.min(w,h)*0.25, w/2, h/2, Math.max(w,h)*0.75);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(0.6, 'rgba(30,20,10,0.08)');
+  grad.addColorStop(0.85, 'rgba(20,15,5,0.25)');
+  grad.addColorStop(1, 'rgba(10,5,0,0.55)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+
+  // Accent-tinted edge glow
+  ctx.save();
+  ctx.globalAlpha = 0.12;
+  const glow = ctx.createRadialGradient(w/2, h*0.35, 0, w/2, h*0.35, Math.max(w,h)*0.5);
+  glow.addColorStop(0, accent);
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
+}
+
+function drawInkBorder(ctx, w, h, accent) {
+  ctx.save();
+  const rng = mulberry32(7);
+  // Rough ink border
+  ctx.strokeStyle = 'rgba(30,20,10,0.6)';
+  ctx.lineWidth = 3;
+  const m = 12;
+  ctx.beginPath();
+  // Top
+  ctx.moveTo(m, m);
+  for (let x = m; x <= w-m; x += 8) {
+    ctx.lineTo(x, m + (rng()-0.5)*3);
+  }
+  // Right
+  for (let y = m; y <= h-m; y += 8) {
+    ctx.lineTo(w-m + (rng()-0.5)*3, y);
+  }
+  // Bottom
+  for (let x = w-m; x >= m; x -= 8) {
+    ctx.lineTo(x, h-m + (rng()-0.5)*3);
+  }
+  // Left
+  for (let y = h-m; y >= m; y -= 8) {
+    ctx.lineTo(m + (rng()-0.5)*3, y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+
+  // Thin accent inner line
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 1.5;
+  ctx.globalAlpha = 0.4;
+  const m2 = 18;
+  ctx.strokeRect(m2, m2, w-m2*2, h-m2*2);
+  ctx.restore();
+}
+
+function drawTitle(ctx, w, h, game) {
+  const scale = Math.min(w, h) / 512;
+
+  // Main title - brush stroke style
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  const titleY = h * 0.18;
+  const titleSize = Math.round(42 * scale);
+
+  // Shadow / ink bleed
+  ctx.fillStyle = 'rgba(20,10,0,0.3)';
+  ctx.font = `bold ${titleSize}px "Georgia", "Times New Roman", serif`;
+  ctx.fillText(game.title, w/2 + 2, titleY + 2);
+
+  // Main title
+  ctx.fillStyle = '#1a0f00';
+  ctx.fillText(game.title, w/2, titleY);
+
+  // Chinese subtitle
+  const subY = titleY + titleSize * 0.8;
+  const subSize = Math.round(30 * scale);
+  ctx.font = `bold ${subSize}px "SimSun", "Songti SC", "Noto Serif CJK SC", serif`;
+  ctx.fillStyle = game.accent;
+  ctx.globalAlpha = 0.9;
+  ctx.fillText(game.subtitle, w/2, subY);
+
+  // English tagline
+  const tagY = subY + subSize * 0.9;
+  const tagSize = Math.round(16 * scale);
+  ctx.globalAlpha = 0.6;
+  ctx.font = `italic ${tagSize}px "Georgia", serif`;
+  ctx.fillStyle = '#3a2a10';
+  ctx.fillText(game.tagline, w/2, tagY);
+
+  ctx.restore();
+}
+
+function drawBranding(ctx, w, h) {
+  const scale = Math.min(w, h) / 512;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  const size = Math.round(13 * scale);
+  ctx.font = `${size}px "Georgia", serif`;
+  ctx.fillStyle = 'rgba(60,40,20,0.5)';
+  ctx.fillText('JoyBoy Games', w/2, h - 16 * scale);
+  ctx.restore();
+}
+
+// ── Decorative ink splatter ──
+function drawInkSplat(ctx, x, y, r, color, rng) {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.15 + rng() * 0.15;
+  ctx.beginPath();
+  const pts = 8 + Math.floor(rng() * 6);
+  for (let i = 0; i <= pts; i++) {
+    const a = (i / pts) * Math.PI * 2;
+    const rr = r * (0.6 + rng() * 0.8);
+    const px = x + Math.cos(a) * rr;
+    const py = y + Math.sin(a) * rr;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+// ── Game-Specific Icon Drawings ──
+
+function drawShanhai(ctx, w, h, accent) {
+  const cx = w / 2, cy = h * 0.58;
+  const scale = Math.min(w, h) / 512;
+  const rng = mulberry32(101);
+
+  // Radiating ink splash
+  ctx.save();
+  for (let i = 0; i < 12; i++) {
+    const angle = (i / 12) * Math.PI * 2;
+    const len = 60 * scale + rng() * 40 * scale;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    const ex = cx + Math.cos(angle) * len;
+    const ey = cy + Math.sin(angle) * len;
+    ctx.lineTo(ex, ey);
+    ctx.strokeStyle = `rgba(30,15,5,${0.2 + rng()*0.3})`;
+    ctx.lineWidth = (2 + rng() * 4) * scale;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    // Splatter dots along ray
+    for (let j = 0; j < 3; j++) {
+      const t = 0.4 + rng() * 0.6;
+      const sx = cx + Math.cos(angle) * len * t + (rng()-0.5) * 15 * scale;
+      const sy = cy + Math.sin(angle) * len * t + (rng()-0.5) * 15 * scale;
+      drawInkSplat(ctx, sx, sy, (3 + rng()*5) * scale, '#1a0f00', rng);
+    }
+  }
+
+  // Central ink pool
+  drawInkSplat(ctx, cx, cy, 25 * scale, accent, rng);
+  drawInkSplat(ctx, cx, cy, 18 * scale, '#1a0f00', rng);
+
+  // Tiny creature silhouettes around the splash
+  ctx.fillStyle = 'rgba(20,10,0,0.6)';
+  const creatures = [
+    // Bird-like shapes
+    (x, y, s) => {
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.quadraticCurveTo(x - 8*s, y - 10*s, x - 15*s, y - 5*s);
+      ctx.moveTo(x, y);
+      ctx.quadraticCurveTo(x + 8*s, y - 10*s, x + 15*s, y - 5*s);
+      ctx.strokeStyle = 'rgba(20,10,0,0.5)';
+      ctx.lineWidth = 1.5 * s;
+      ctx.stroke();
+    },
+    // Four-legged beast
+    (x, y, s) => {
+      ctx.beginPath();
+      ctx.ellipse(x, y, 10*s, 6*s, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.fillRect(x-8*s, y+4*s, 2*s, 6*s);
+      ctx.fillRect(x-3*s, y+4*s, 2*s, 6*s);
+      ctx.fillRect(x+3*s, y+4*s, 2*s, 6*s);
+      ctx.fillRect(x+7*s, y+4*s, 2*s, 6*s);
+    },
+    // Snake-like
+    (x, y, s) => {
+      ctx.beginPath();
+      ctx.moveTo(x-10*s, y);
+      ctx.bezierCurveTo(x-5*s, y-6*s, x+5*s, y+6*s, x+12*s, y);
+      ctx.strokeStyle = 'rgba(20,10,0,0.5)';
+      ctx.lineWidth = 2 * s;
+      ctx.stroke();
+    }
+  ];
+
+  for (let i = 0; i < 6; i++) {
+    const angle = (i / 6) * Math.PI * 2 + 0.3;
+    const dist = (90 + rng() * 30) * scale;
+    const px = cx + Math.cos(angle) * dist;
+    const py = cy + Math.sin(angle) * dist;
+    creatures[i % creatures.length](px, py, scale);
+  }
+  ctx.restore();
+}
+
+function drawCloudLeap(ctx, w, h, accent) {
+  const scale = Math.min(w, h) / 512;
+  const rng = mulberry32(202);
+  const baseY = h * 0.75;
+
+  ctx.save();
+
+  // Mountain layers (back to front)
+  const layers = [
+    { y: baseY - 30*scale, color: 'rgba(40,50,60,0.15)', height: 120*scale },
+    { y: baseY - 10*scale, color: 'rgba(40,50,60,0.25)', height: 100*scale },
+    { y: baseY + 15*scale, color: 'rgba(30,40,50,0.4)',  height: 80*scale },
+  ];
+
+  layers.forEach((layer, li) => {
+    ctx.beginPath();
+    ctx.moveTo(0, h);
+    const peaks = 5 + li;
+    for (let i = 0; i <= peaks; i++) {
+      const x = (i / peaks) * w;
+      const peakH = layer.height * (0.5 + rng() * 0.5);
+      if (i % 2 === 0) {
+        ctx.lineTo(x, layer.y - peakH);
+      } else {
+        ctx.lineTo(x, layer.y - peakH * 0.3);
+      }
+    }
+    ctx.lineTo(w, h);
+    ctx.closePath();
+    ctx.fillStyle = layer.color;
+    ctx.fill();
+  });
+
+  // Mist/cloud bands
+  for (let i = 0; i < 3; i++) {
+    const cloudY = baseY - 50*scale - i * 35 * scale;
+    ctx.beginPath();
+    ctx.ellipse(w/2 + (rng()-0.5)*100*scale, cloudY, 120*scale + rng()*60*scale, 12*scale, 0, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(245,230,200,0.3)';
+    ctx.fill();
+  }
+
+  // Small flying figure
+  const figX = w * 0.55, figY = h * 0.42;
+  ctx.fillStyle = accent;
+  ctx.globalAlpha = 0.8;
+  // Body
+  ctx.beginPath();
+  ctx.ellipse(figX, figY, 5*scale, 8*scale, -0.3, 0, Math.PI*2);
+  ctx.fill();
+  // Flowing cape/scarf
+  ctx.beginPath();
+  ctx.moveTo(figX - 3*scale, figY + 3*scale);
+  ctx.bezierCurveTo(figX - 15*scale, figY + 10*scale, figX - 25*scale, figY + 5*scale, figX - 35*scale, figY + 15*scale);
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2.5 * scale;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+  // Arms spread
+  ctx.beginPath();
+  ctx.moveTo(figX - 4*scale, figY - 2*scale);
+  ctx.lineTo(figX - 14*scale, figY - 8*scale);
+  ctx.moveTo(figX + 4*scale, figY - 2*scale);
+  ctx.lineTo(figX + 12*scale, figY - 10*scale);
+  ctx.strokeStyle = 'rgba(20,10,0,0.6)';
+  ctx.lineWidth = 2 * scale;
+  ctx.stroke();
+
+  // Trail dots behind figure
+  ctx.globalAlpha = 0.3;
+  for (let i = 0; i < 8; i++) {
+    const tx = figX - 20*scale - i * 12 * scale;
+    const ty = figY + 10*scale + i * 5 * scale + (rng()-0.5)*8*scale;
+    ctx.beginPath();
+    ctx.arc(tx, ty, (3 - i*0.3)*scale, 0, Math.PI*2);
+    ctx.fillStyle = accent;
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawRicochet(ctx, w, h, accent) {
+  const scale = Math.min(w, h) / 512;
+  const rng = mulberry32(303);
+
+  ctx.save();
+
+  // Brick grid
+  const gridX = w * 0.2, gridY = h * 0.4;
+  const gridW = w * 0.6, gridH = h * 0.25;
+  const cols = 7, rows = 4;
+  const bw = gridW / cols, bh = gridH / rows;
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (rng() > 0.25) { // Some bricks missing
+        const x = gridX + c * bw;
+        const y = gridY + r * bh;
+        ctx.fillStyle = rng() > 0.5 ? 'rgba(30,20,10,0.2)' : `rgba(${parseInt(accent.slice(1,3),16)},${parseInt(accent.slice(3,5),16)},${parseInt(accent.slice(5,7),16)},0.15)`;
+        ctx.fillRect(x + 1, y + 1, bw - 2, bh - 2);
+        ctx.strokeStyle = 'rgba(30,20,10,0.3)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 1, y + 1, bw - 2, bh - 2);
+      }
+    }
+  }
+
+  // Ball trail - bouncing path
+  ctx.beginPath();
+  const points = [
+    [w*0.15, h*0.8],
+    [w*0.3, h*0.42],
+    [w*0.45, h*0.65],
+    [w*0.55, h*0.38],
+    [w*0.7, h*0.55],
+    [w*0.82, h*0.35],
+  ];
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i][0], points[i][1]);
+  }
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2.5 * scale;
+  ctx.globalAlpha = 0.5;
+  ctx.setLineDash([6*scale, 4*scale]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Ball at end
+  ctx.globalAlpha = 0.9;
+  ctx.beginPath();
+  ctx.arc(points[points.length-1][0], points[points.length-1][1], 8*scale, 0, Math.PI*2);
+  ctx.fillStyle = accent;
+  ctx.fill();
+  ctx.strokeStyle = '#1a0f00';
+  ctx.lineWidth = 1.5 * scale;
+  ctx.stroke();
+
+  // Impact stars at bounce points
+  ctx.globalAlpha = 0.4;
+  for (let i = 1; i < points.length - 1; i++) {
+    const [px, py] = points[i];
+    for (let j = 0; j < 4; j++) {
+      const a = (j / 4) * Math.PI * 2 + rng() * 0.5;
+      const len = (8 + rng()*6) * scale;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px + Math.cos(a)*len, py + Math.sin(a)*len);
+      ctx.strokeStyle = '#1a0f00';
+      ctx.lineWidth = 1 * scale;
+      ctx.stroke();
+    }
+  }
+
+  // Scroll decorative corners
+  ctx.globalAlpha = 0.2;
+  ctx.strokeStyle = '#3a2a10';
+  ctx.lineWidth = 2 * scale;
+  const scrollR = 20 * scale;
+  // Top-left scroll curl
+  ctx.beginPath();
+  ctx.arc(w*0.12, h*0.38, scrollR, 0, Math.PI*1.5, true);
+  ctx.stroke();
+  // Top-right scroll curl
+  ctx.beginPath();
+  ctx.arc(w*0.88, h*0.38, scrollR, Math.PI*0.5, Math.PI, false);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawSpiritSerpent(ctx, w, h, accent) {
+  const cx = w / 2, cy = h * 0.58;
+  const scale = Math.min(w, h) / 512;
+  const rng = mulberry32(404);
+
+  ctx.save();
+
+  // Coiled dragon/serpent silhouette
+  ctx.globalAlpha = 0.7;
+
+  // Coil body using bezier curves
+  const coils = [];
+  const numCoils = 3;
+  for (let i = 0; i < numCoils; i++) {
+    const angle = (i / numCoils) * Math.PI * 2;
+    const r = (40 + i * 20) * scale;
+    coils.push({
+      x: cx + Math.cos(angle) * r * 0.6,
+      y: cy + Math.sin(angle) * r * 0.4,
+    });
+  }
+
+  // Draw serpent body as thick curved path
+  ctx.beginPath();
+  const bodyPts = [];
+  for (let t = 0; t <= 1; t += 0.02) {
+    const angle = t * Math.PI * 5; // 2.5 full coils
+    const r = (30 + t * 60) * scale;
+    const x = cx + Math.cos(angle) * r * 0.7;
+    const y = cy + Math.sin(angle) * r * 0.5 - t * 30 * scale;
+    bodyPts.push([x, y]);
+  }
+
+  // Stroke body
+  ctx.beginPath();
+  ctx.moveTo(bodyPts[0][0], bodyPts[0][1]);
+  for (let i = 1; i < bodyPts.length; i++) {
+    ctx.lineTo(bodyPts[i][0], bodyPts[i][1]);
+  }
+  ctx.strokeStyle = '#1a0f00';
+  ctx.lineWidth = 10 * scale;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.globalAlpha = 0.35;
+  ctx.stroke();
+
+  // Inner stroke with accent color
+  ctx.lineWidth = 6 * scale;
+  ctx.strokeStyle = accent;
+  ctx.globalAlpha = 0.4;
+  ctx.stroke();
+
+  // Head
+  const headPt = bodyPts[bodyPts.length - 1];
+  ctx.globalAlpha = 0.7;
+  ctx.beginPath();
+  ctx.ellipse(headPt[0], headPt[1] - 5*scale, 12*scale, 8*scale, -0.5, 0, Math.PI*2);
+  ctx.fillStyle = '#1a0f00';
+  ctx.fill();
+
+  // Eye
+  ctx.beginPath();
+  ctx.arc(headPt[0] + 4*scale, headPt[1] - 8*scale, 2.5*scale, 0, Math.PI*2);
+  ctx.fillStyle = accent;
+  ctx.globalAlpha = 0.9;
+  ctx.fill();
+
+  // Horns
+  ctx.beginPath();
+  ctx.moveTo(headPt[0] - 5*scale, headPt[1] - 10*scale);
+  ctx.lineTo(headPt[0] - 12*scale, headPt[1] - 25*scale);
+  ctx.moveTo(headPt[0] + 2*scale, headPt[1] - 12*scale);
+  ctx.lineTo(headPt[0] + 5*scale, headPt[1] - 27*scale);
+  ctx.strokeStyle = '#1a0f00';
+  ctx.lineWidth = 2 * scale;
+  ctx.globalAlpha = 0.6;
+  ctx.stroke();
+
+  // Whiskers
+  ctx.beginPath();
+  ctx.moveTo(headPt[0] + 10*scale, headPt[1] - 5*scale);
+  ctx.bezierCurveTo(headPt[0]+25*scale, headPt[1]-15*scale, headPt[0]+30*scale, headPt[1]-10*scale, headPt[0]+40*scale, headPt[1]-20*scale);
+  ctx.moveTo(headPt[0] + 10*scale, headPt[1]);
+  ctx.bezierCurveTo(headPt[0]+25*scale, headPt[1]+5*scale, headPt[0]+35*scale, headPt[1]-5*scale, headPt[0]+42*scale, headPt[1]+5*scale);
+  ctx.strokeStyle = 'rgba(30,15,5,0.4)';
+  ctx.lineWidth = 1.5 * scale;
+  ctx.stroke();
+
+  // Mystical energy dots around the serpent
+  ctx.globalAlpha = 0.25;
+  for (let i = 0; i < 15; i++) {
+    const angle = rng() * Math.PI * 2;
+    const dist = (80 + rng() * 40) * scale;
+    const px = cx + Math.cos(angle) * dist;
+    const py = cy + Math.sin(angle) * dist * 0.6;
+    ctx.beginPath();
+    ctx.arc(px, py, (1.5 + rng()*2.5)*scale, 0, Math.PI*2);
+    ctx.fillStyle = rng() > 0.5 ? accent : '#1a0f00';
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+function drawFateCards(ctx, w, h, accent) {
+  const cx = w / 2, cy = h * 0.57;
+  const scale = Math.min(w, h) / 512;
+  const rng = mulberry32(505);
+
+  ctx.save();
+
+  const cardW = 45 * scale, cardH = 65 * scale;
+  const numCards = 5;
+  const spread = 14 * scale; // horizontal spread between cards
+  const symbols = ['?', '?', '?', '?', '?']; // placeholders
+
+  // Draw fanned cards
+  for (let i = 0; i < numCards; i++) {
+    const angle = (i - 2) * 0.18; // fan angle
+    const offsetX = (i - 2) * spread;
+    const offsetY = Math.abs(i - 2) * 5 * scale;
+
+    ctx.save();
+    ctx.translate(cx + offsetX, cy + offsetY);
+    ctx.rotate(angle);
+
+    // Card shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.fillRect(-cardW/2 + 3*scale, -cardH/2 + 3*scale, cardW, cardH);
+
+    // Card body
+    ctx.fillStyle = '#f0e4cc';
+    ctx.fillRect(-cardW/2, -cardH/2, cardW, cardH);
+    ctx.strokeStyle = 'rgba(40,25,10,0.5)';
+    ctx.lineWidth = 1.5 * scale;
+    ctx.strokeRect(-cardW/2, -cardH/2, cardW, cardH);
+
+    // Inner border
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 0.8 * scale;
+    ctx.globalAlpha = 0.4;
+    ctx.strokeRect(-cardW/2 + 3*scale, -cardH/2 + 3*scale, cardW - 6*scale, cardH - 6*scale);
+    ctx.globalAlpha = 1;
+
+    // Mystical symbol on each card
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const symbolSize = Math.round(22 * scale);
+
+    const cardSymbols = ['?', '?', '?', '?', '?'];
+    const inkSymbols = ['??', '??', '??', '??', '???'];
+
+    // Draw an abstract symbol instead
+    ctx.fillStyle = 'rgba(30,15,5,0.5)';
+    ctx.font = `bold ${symbolSize}px "Georgia", serif`;
+
+    // Different geometric symbols for each card
+    const symFuncs = [
+      // Circle (sun)
+      () => { ctx.beginPath(); ctx.arc(0, 0, 10*scale, 0, Math.PI*2); ctx.stroke();
+              for(let j=0;j<8;j++){const a=j*Math.PI/4;ctx.beginPath();ctx.moveTo(Math.cos(a)*12*scale,Math.sin(a)*12*scale);ctx.lineTo(Math.cos(a)*16*scale,Math.sin(a)*16*scale);ctx.stroke();}},
+      // Triangle (mountain)
+      () => { ctx.beginPath(); ctx.moveTo(0,-14*scale); ctx.lineTo(-12*scale,10*scale); ctx.lineTo(12*scale,10*scale); ctx.closePath(); ctx.stroke(); },
+      // Diamond
+      () => { ctx.beginPath(); ctx.moveTo(0,-14*scale); ctx.lineTo(10*scale,0); ctx.lineTo(0,14*scale); ctx.lineTo(-10*scale,0); ctx.closePath(); ctx.stroke(); },
+      // Wave (water)
+      () => { for(let j=-1;j<=1;j++){ctx.beginPath(); ctx.moveTo(-12*scale,j*8*scale); ctx.bezierCurveTo(-4*scale,j*8*scale-6*scale,4*scale,j*8*scale+6*scale,12*scale,j*8*scale); ctx.stroke();}},
+      // Star
+      () => { ctx.beginPath(); for(let j=0;j<5;j++){const a=j*Math.PI*2/5-Math.PI/2; const a2=a+Math.PI/5; ctx.lineTo(Math.cos(a)*14*scale,Math.sin(a)*14*scale); ctx.lineTo(Math.cos(a2)*6*scale,Math.sin(a2)*6*scale);} ctx.closePath(); ctx.stroke(); },
+    ];
+
+    ctx.strokeStyle = i === 2 ? accent : 'rgba(40,25,10,0.45)';
+    ctx.lineWidth = 1.5 * scale;
+    symFuncs[i]();
+
+    ctx.restore();
+  }
+
+  // Glowing accent aura behind center card
+  ctx.globalAlpha = 0.15;
+  const auraGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 50*scale);
+  auraGrad.addColorStop(0, accent);
+  auraGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = auraGrad;
+  ctx.fillRect(cx - 60*scale, cy - 60*scale, 120*scale, 120*scale);
+
+  // Floating particles
+  ctx.globalAlpha = 0.2;
+  for (let i = 0; i < 12; i++) {
+    const px = cx + (rng() - 0.5) * 200 * scale;
+    const py = cy + (rng() - 0.5) * 140 * scale;
+    ctx.beginPath();
+    ctx.arc(px, py, (1 + rng()*2)*scale, 0, Math.PI*2);
+    ctx.fillStyle = rng() > 0.5 ? accent : '#f0e4cc';
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+// ── Main render function for one thumbnail ──
+function renderThumbnail(canvas, game, w, h) {
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+
+  // 1. Parchment background
+  fillParchment(ctx, w, h, game.id.length * 7);
+
+  // 2. Game icon in center area
+  game.drawIcon(ctx, w, h, game.accent);
+
+  // 3. Vignette overlay
+  drawVignette(ctx, w, h, game.accent);
+
+  // 4. Ink border
+  drawInkBorder(ctx, w, h, game.accent);
+
+  // 5. Title text
+  drawTitle(ctx, w, h, game);
+
+  // 6. JoyBoy Games branding
+  drawBranding(ctx, w, h);
+}
+
+// ── Build DOM ──
+function buildUI() {
+  const container = document.getElementById('container');
+  container.innerHTML = '';
+
+  GAMES.forEach((game, gi) => {
+    const section = document.createElement('div');
+    section.className = 'game-section';
+
+    const h2 = document.createElement('h2');
+    h2.textContent = `${game.title}: ${game.tagline} (${game.subtitle})`;
+    section.appendChild(h2);
+
+    const row = document.createElement('div');
+    row.className = 'canvas-row';
+
+    SIZES.forEach((size, si) => {
+      const item = document.createElement('div');
+      item.className = 'canvas-item';
+
+      const label = document.createElement('label');
+      label.textContent = size.label;
+      item.appendChild(label);
+
+      const canvas = document.createElement('canvas');
+      canvas.id = `c-${gi}-${si}`;
+      canvas.style.maxWidth = '320px';
+      item.appendChild(canvas);
+
+      const btn = document.createElement('button');
+      btn.textContent = 'Download';
+      btn.onclick = () => downloadCanvas(canvas, `${game.id}-${size.suffix}.png`);
+      item.appendChild(btn);
+
+      row.appendChild(item);
+    });
+
+    section.appendChild(row);
+    container.appendChild(section);
+  });
+}
+
+function renderAll() {
+  GAMES.forEach((game, gi) => {
+    SIZES.forEach((size, si) => {
+      const canvas = document.getElementById(`c-${gi}-${si}`);
+      if (canvas) renderThumbnail(canvas, game, size.w, size.h);
+    });
+  });
+}
+
+function downloadCanvas(canvas, filename) {
+  const a = document.createElement('a');
+  a.download = filename;
+  a.href = canvas.toDataURL('image/png');
+  a.click();
+}
+
+function downloadAll() {
+  GAMES.forEach((game, gi) => {
+    SIZES.forEach((size, si) => {
+      const canvas = document.getElementById(`c-${gi}-${si}`);
+      if (canvas) {
+        setTimeout(() => downloadCanvas(canvas, `${game.id}-${size.suffix}.png`), (gi * 3 + si) * 200);
+      }
+    });
+  });
+}
+
+// Init
+buildUI();
+renderAll();
+</script>
+</body>
+</html>

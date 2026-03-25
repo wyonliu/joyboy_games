@@ -1,0 +1,15 @@
+{
+  "name": "@joyboy/melos-quest-2",
+  "version": "0.1.0",
+  "description": "Melo's Cloud Leap - One-tap precision flying with ink-wash Shanhai Jing theme",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview --host"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0",
+    "typescript": "^5.7.0"
+  }
+}

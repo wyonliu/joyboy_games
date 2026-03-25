@@ -1,0 +1,13 @@
+{
+  "name": "@joyboy/scaffold",
+  "version": "1.0.0",
+  "description": "JoyBoy Games - Rapid game production scaffold",
+  "type": "module",
+  "scripts": {
+    "new": "node scripts/create-game.js",
+    "dev": "echo 'Usage: cd games/<game-name> && npm run dev'",
+    "build": "echo 'Usage: cd games/<game-name> && npm run build'"
+  },
+  "author": "JoyBoy Games",
+  "license": "MIT"
+}
