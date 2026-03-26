@@ -33,6 +33,20 @@ const ELEM_COLORS: [string, string, string][] = [
 ];
 const ELEM_GLOW = ['#ff440088', '#44aaff88', '#44dd5588', '#ffdd4488', '#cc884488'];
 
+// Wuxing Sheng (生) cycle: parent feeds child
+// FIRE=0, WATER=1, WOOD=2, METAL=3, EARTH=4
+// Wood(2)->Fire(0), Fire(0)->Earth(4), Earth(4)->Metal(3), Metal(3)->Water(1), Water(1)->Wood(2)
+const SHENG_CYCLE: Record<number, number> = {
+  0: 4,  // Fire  feeds Earth  — 火生土
+  1: 2,  // Water feeds Wood   — 水生木
+  2: 0,  // Wood  feeds Fire   — 木生火
+  3: 1,  // Metal feeds Water  — 金生水
+  4: 3,  // Earth feeds Metal  — 土生金
+};
+const SHENG_NAMES: Record<string, string> = {
+  '2,0': '木生火', '0,4': '火生土', '4,3': '土生金', '3,1': '金生水', '1,2': '水生木',
+};
+
 // Game state
 type Screen = 'title' | 'playing' | 'levelComplete' | 'gameOver' | 'collection';
 type BoardState = 'idle' | 'selected' | 'swapping' | 'checking' | 'swapBack' |
@@ -62,6 +76,10 @@ interface Gem {
   // Invalid swap wobble
   wobble: number;
   wobbleCount: number;
+  // Sheng-Ke chain reaction
+  shengKeTarget: boolean;
+  shengKeDelay: number;
+  shengKeSource: number; // element type of the source that triggered this
   // Hitstop: gem is frozen white before destruction
   hitstop: number;
   // Anticipation particles spawned flag
@@ -130,6 +148,7 @@ let totalScore = 0;
 let highScore = 0;
 let comboText = '';
 let comboTextTimer = 0;
+let comboTextLevel = 0; // cascade level when combo text was set
 let shakeX = 0, shakeY = 0, shakeMag = 0, shakeTimer = 0;
 let slowMo = 1.0;
 let slowMoTimer = 0;
@@ -151,7 +170,20 @@ let levelTransTimer = 0;
 let pendingSpecials: {r: number, c: number, special: number, type: number}[] = [];
 let screenTransition = 0;
 let matchSetsThisStep: {r: number, c: number}[][] = [];
-let bonusPhase: 'placing' | 'exploding' | 'done' = 'placing';
+let bonusPhase: 'placing' | 'exploding' | 'done' | 'none' = 'none';
+
+// Flag: true only during the initial player-initiated swap check (not cascade)
+let isPlayerSwap = false;
+
+// Pause state
+let paused = false;
+
+// Mute state
+let muted = false;
+
+// Button press animation timers
+let pauseBtnPressTimer = 0;
+let muteBtnPressTimer = 0;
 
 // New: Swipe/drag input state
 let dragActive = false;
@@ -162,12 +194,19 @@ let dragExecuted = false;
 // New: ambient particles for background
 let ambientParticles: {x: number, y: number, vx: number, vy: number, life: number, size: number, alpha: number}[] = [];
 
+// Match preview: cells that would match if current drag completes
+let previewCells: {r: number, c: number}[] = [];
+let previewTimer = 0;
+
 // New: board breathing effect
 let boardBreathTimer = 0;
 let boardBreathMag = 0;
 
 // New: idle timer for wink animation
 let idleTimer = 0;
+
+// Level complete confetti
+let confetti: {x: number, y: number, vx: number, vy: number, rot: number, rotV: number, color: string, w: number, h: number, life: number}[] = [];
 
 // Multiplier display
 let multiplierDisplay = 0;
@@ -235,6 +274,7 @@ function initAudio(): void {
     masterGain.gain.value = 0.5;
     masterGain.connect(audioCtx.destination);
     audioInited = true;
+    if (muted) masterGain.gain.value = 0;
     if (audioCtx.state === 'suspended') audioCtx.resume();
     // Start ambient drone
     startDrone();
@@ -316,6 +356,12 @@ function startDrone(): void {
   droneOsc2.connect(droneGain2);
   droneGain2.connect(droneGain);
   droneOsc2.start();
+}
+
+function stopDrone(): void {
+  if (droneOsc1) { try { droneOsc1.stop(); } catch { /* ignore */ } droneOsc1 = null; }
+  if (droneOsc2) { try { droneOsc2.stop(); } catch { /* ignore */ } droneOsc2 = null; }
+  if (droneGain) { droneGain.disconnect(); droneGain = null; }
 }
 
 function updateDrone(dominantElement: number, isComboing: boolean): void {
@@ -491,6 +537,14 @@ const SFX = {
     // Reverb tail
     playToneDelayed(1200, 0.08, 0.04, 'sine', 60);
   },
+  shengKe(pitch = 1.0): void {
+    // Guzheng-like pluck: rising pitch, bright and clear
+    const base = 660 * pitch;
+    playTone(base, 0.4, 0.25, 'triangle');
+    playTone(base * 2, 0.3, 0.12, 'sine');
+    playTone(base * 3.01, 0.2, 0.06, 'sine'); // slight inharmonic shimmer
+    playToneDelayed(base * 1.5, 0.25, 0.1, 'triangle', 60);
+  },
   boardShuffle(): void {
     playSweep(600, 200, 0.3, 0.2, 'triangle');
     playNoise(0.3, 0.15, 2000);
@@ -594,6 +648,8 @@ function createBoardTexture(): void {
 
 function spawnParticle(x: number, y: number, color: string, type: Particle['type'] = 'spark', count = 1): void {
   for (let i = 0; i < count; i++) {
+    // Particle cap: hard limit at 300
+    if (particles.length >= 300) return;
     const angle = Math.random() * Math.PI * 2;
     const speed = type === 'spark' ? 80 + Math.random() * 160 :
                   type === 'ember' ? 20 + Math.random() * 40 :
@@ -603,16 +659,16 @@ function spawnParticle(x: number, y: number, color: string, type: Particle['type
                   type === 'fragment' ? 80 + Math.random() * 150 :
                   type === 'beam' ? 5 :
                   30 + Math.random() * 60;
+    // Fix #2: compute one random life value and use it for both life and maxLife
+    const randLife = type === 'ember' ? 0.6 + Math.random() * 0.8 :
+                     type === 'beam' ? 0.3 + Math.random() * 0.2 :
+                     0.4 + Math.random() * 0.4;
     particles.push({
       x, y,
       vx: Math.cos(angle) * speed,
       vy: type === 'ember' ? -(30 + Math.random() * 50) : Math.sin(angle) * speed - (type === 'star' ? 50 : 0),
-      life: type === 'ember' ? 0.6 + Math.random() * 0.8 :
-            type === 'beam' ? 0.3 + Math.random() * 0.2 :
-            0.4 + Math.random() * 0.4,
-      maxLife: type === 'ember' ? 0.6 + Math.random() * 0.8 :
-               type === 'beam' ? 0.3 + Math.random() * 0.2 :
-               0.4 + Math.random() * 0.4,
+      life: randLife,
+      maxLife: randLife,
       color,
       size: type === 'ring' ? 15 + Math.random() * 10 :
             type === 'ember' ? 1.5 + Math.random() * 2 :
@@ -632,14 +688,16 @@ function spawnElementShatter(x: number, y: number, type: number, count: number):
   const midColor = type >= 0 && type < 5 ? ELEM_COLORS[type][1] : '#dddddd';
   // Common shatter pieces
   for (let i = 0; i < count; i++) {
+    if (particles.length >= 300) return;
     const angle = Math.random() * Math.PI * 2;
     const speed = 100 + Math.random() * 200;
+    const shardLife = 0.5 + Math.random() * 0.5;
     particles.push({
       x, y,
       vx: Math.cos(angle) * speed,
       vy: Math.sin(angle) * speed - 30,
-      life: 0.5 + Math.random() * 0.5,
-      maxLife: 0.5 + Math.random() * 0.5,
+      life: shardLife,
+      maxLife: shardLife,
       color: Math.random() > 0.5 ? color : midColor,
       size: 2 + Math.random() * 4,
       type: 'shard',
@@ -660,14 +718,16 @@ function spawnElementShatter(x: number, y: number, type: number, count: number):
   } else if (type === METAL) {
     // Spark shower
     for (let i = 0; i < count; i++) {
+      if (particles.length >= 300) break;
       const angle = Math.random() * Math.PI * 2;
       const speed = 150 + Math.random() * 250;
+      const metalLife = 0.2 + Math.random() * 0.3;
       particles.push({
         x, y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
-        life: 0.2 + Math.random() * 0.3,
-        maxLife: 0.2 + Math.random() * 0.3,
+        life: metalLife,
+        maxLife: metalLife,
         color: Math.random() > 0.5 ? '#ffffff' : '#ffee88',
         size: 1 + Math.random() * 2,
         type: 'spark',
@@ -768,6 +828,7 @@ function updateParticles(dt: number): void {
 
 function spawnAnticipationParticles(cx: number, cy: number): void {
   for (let i = 0; i < 6; i++) {
+    if (particles.length >= 300) return;
     const angle = Math.random() * Math.PI * 2;
     const dist = 20 + Math.random() * 15;
     particles.push({
@@ -786,6 +847,7 @@ function spawnAnticipationParticles(cx: number, cy: number): void {
 
 function spawnDustParticles(cx: number, cy: number): void {
   for (let i = 0; i < 5; i++) {
+    if (particles.length >= 300) return;
     const angle = -Math.PI + Math.random() * Math.PI; // upward half
     const speed = 30 + Math.random() * 50;
     particles.push({
@@ -865,7 +927,8 @@ function makeGem(type: number, special = SP_NONE): Gem {
   return { type, special, vx: 0, vy: 0, vs: 1, va: 1, removing: false, spawning: false, shimmer: Math.random() * Math.PI * 2,
     landBounce: 0, landBounceV: 0, destroyFlash: 0, winkTimer: 0,
     idlePhase: Math.random() * Math.PI * 2, swapPop: 0, wobble: 0, wobbleCount: 0,
-    hitstop: 0, hitstopParticlesSpawned: false, dustSpawned: false };
+    hitstop: 0, hitstopParticlesSpawned: false, dustSpawned: false,
+    shengKeTarget: false, shengKeDelay: 0, shengKeSource: -1 };
 }
 
 function randomType(): number { return Math.floor(Math.random() * ELEM_COUNT); }
@@ -917,7 +980,7 @@ function findMatches(): MatchGroup[] {
     for (let c = 1; c <= COLS; c++) {
       const cur = c < COLS ? grid[r][c] : null;
       const start = grid[r][runStart];
-      if (cur && start && cur.type === start.type && cur.type >= 0 && !cur.removing && !start.removing) continue;
+      if (cur && start && cur.type === start.type && cur.type >= 0 && !cur.removing && !start.removing && !cur.spawning && !start.spawning) continue;
       const len = c - runStart;
       if (len >= 3 && start && start.type >= 0) {
         const cells: {r: number, c: number}[] = [];
@@ -933,7 +996,7 @@ function findMatches(): MatchGroup[] {
     for (let r = 1; r <= ROWS; r++) {
       const cur = r < ROWS ? grid[r][c] : null;
       const start = grid[runStart][c];
-      if (cur && start && cur.type === start.type && cur.type >= 0 && !cur.removing && !start.removing) continue;
+      if (cur && start && cur.type === start.type && cur.type >= 0 && !cur.removing && !start.removing && !cur.spawning && !start.spawning) continue;
       const len = r - runStart;
       if (len >= 3 && start && start.type >= 0) {
         const cells: {r: number, c: number}[] = [];
@@ -1035,10 +1098,13 @@ function activateSpecial(r: number, c: number, gem: Gem): {r: number, c: number}
       if (g && g.type >= 0 && g.type < 5 && !g.removing) counts[g.type]++;
     }
     let targetType = counts.indexOf(Math.max(...counts));
-    const otherR = (r === swapR1 && c === swapC1) ? swapR2 : swapR1;
-    const otherC = (r === swapR1 && c === swapC1) ? swapC2 : swapC1;
-    const other = grid[otherR]?.[otherC];
-    if (other && other.type >= 0 && other.type < 5) targetType = other.type;
+    // Fix #3: Only use swap coordinates if this is a player-initiated swap, not a cascade
+    if (isPlayerSwap) {
+      const otherR = (r === swapR1 && c === swapC1) ? swapR2 : swapR1;
+      const otherC = (r === swapR1 && c === swapC1) ? swapC2 : swapC1;
+      const other = grid[otherR]?.[otherC];
+      if (other && other.type >= 0 && other.type < 5) targetType = other.type;
+    }
     for (let rr = 0; rr < ROWS; rr++) for (let cc = 0; cc < COLS; cc++) {
       const g = grid[rr][cc];
       if (g && g.type === targetType && !g.removing) cells.push({ r: rr, c: cc });
@@ -1206,6 +1272,9 @@ function processMatches(matches: MatchGroup[]): void {
   hitstopTimer = 0.06;
   hitstopActive = true;
 
+  // Sheng-Ke chain reaction: mark adjacent "child" gems for delayed destruction
+  applyShengKe(matches);
+
   const baseScore = allCells.length * 10;
   const matchScore = baseScore * cascadeLevel;
   score += matchScore;
@@ -1227,6 +1296,7 @@ function processMatches(matches: MatchGroup[]): void {
     const texts = ['', '', '好!', '妙!', '绝!', '天降神迹!', '逆天改命!', '开天辟地!'];
     comboText = texts[Math.min(cascadeLevel, 7)];
     comboTextTimer = 1.2;
+    comboTextLevel = cascadeLevel;
     SFX.comboSound(cascadeLevel);
   }
 
@@ -1242,16 +1312,194 @@ function processMatches(matches: MatchGroup[]): void {
     boardPulseTimer = 0.4;
     // Board brighten (lightning flash)
     boardBrightenTimer = 0.15;
+    // Slam effect: board slams down 5px then springs back over 0.3s
+    boardSlamTimer = 0.3;
+    boardSlamPhase = 'lift';
   }
   if (cascadeLevel >= 5) {
     triggerShake(15); slowMo = 0.2; slowMoTimer = 0.6; screenFlash = 0.8;
     boardBreathMag = 1.0; boardBreathTimer = 0.5;
     boardPulseTimer = 0.5;
     boardBrightenTimer = 0.2;
-    // Slam effect: all gems lift then slam
     boardSlamTimer = 0.4;
     boardSlamPhase = 'lift';
   }
+}
+
+// ============================================================================
+// SHENG-KE (生克) CHAIN REACTION
+// ============================================================================
+
+// After processMatches marks gems for removal, check neighbors for sheng-ke chain.
+// Only triggers on matches of 4+ gems.
+function applyShengKe(matches: MatchGroup[]): void {
+  // Only trigger on matches with 4+ gems
+  const largeCells = new Set<string>();
+  for (const m of matches) {
+    if (m.length >= 4) {
+      for (const cell of m.cells) largeCells.add(`${cell.r},${cell.c}`);
+    }
+  }
+  if (largeCells.size === 0) return;
+
+  const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+  const triggered = new Set<string>();
+
+  for (const key of largeCells) {
+    const [rStr, cStr] = key.split(',');
+    const r = parseInt(rStr), c = parseInt(cStr);
+    const g = grid[r][c];
+    if (!g) continue;
+    const parentType = g.type;
+    if (parentType < 0 || parentType >= ELEM_COUNT) continue;
+    const childType = SHENG_CYCLE[parentType];
+
+    for (const [dr, dc] of dirs) {
+      const nr = r + dr, nc = c + dc;
+      if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
+      const ng = grid[nr][nc];
+      if (!ng || ng.removing || ng.shengKeTarget || ng.type !== childType) continue;
+      const nKey = `${nr},${nc}`;
+      if (triggered.has(nKey)) continue;
+      triggered.add(nKey);
+
+      ng.shengKeTarget = true;
+      ng.shengKeDelay = 0.3;
+      ng.shengKeSource = parentType;
+
+      // Visual: golden glow pulse on the target gem (drawn in render)
+      // Connection line + floating text
+      const sx = cellX(c) + CELL / 2, sy = cellY(r) + CELL / 2;
+      const tx = cellX(nc) + CELL / 2, ty = cellY(nr) + CELL / 2;
+      spawnShengKeLine(sx, sy, tx, ty);
+
+      const label = SHENG_NAMES[`${parentType},${childType}`] || '五行相生';
+      addFloatingText((sx + tx) / 2, (sy + ty) / 2 - 10, label, '#ffd700', 18);
+
+      SFX.shengKe(1.0 + triggered.size * 0.08);
+    }
+  }
+}
+
+// Sheng-Ke ink brush stroke animation data
+let shengKeStrokes: {sx: number, sy: number, tx: number, ty: number, progress: number, life: number}[] = [];
+
+// Spawn an animated ink brush stroke from source to target over 0.2s
+function spawnShengKeLine(sx: number, sy: number, tx: number, ty: number): void {
+  shengKeStrokes.push({ sx, sy, tx, ty, progress: 0, life: 0.6 });
+  // Also spawn golden particles along the path
+  for (let i = 0; i < 4; i++) {
+    if (particles.length >= 300) return;
+    const t = i / 3;
+    const px = sx + (tx - sx) * t;
+    const py = sy + (ty - sy) * t;
+    const pLife = 0.4;
+    particles.push({
+      x: px + (Math.random() - 0.5) * 4,
+      y: py + (Math.random() - 0.5) * 4,
+      vx: (Math.random() - 0.5) * 10,
+      vy: (Math.random() - 0.5) * 10,
+      life: pLife, maxLife: pLife,
+      color: '#ffd700',
+      size: 2 + Math.random() * 2,
+      type: 'star',
+      rotation: Math.random() * Math.PI * 2,
+      rotSpeed: (Math.random() - 0.5) * 3,
+    });
+  }
+}
+
+function updateShengKeStrokes(dt: number): void {
+  for (let i = shengKeStrokes.length - 1; i >= 0; i--) {
+    const s = shengKeStrokes[i];
+    // Draw progress: 0 -> 1 over 0.2s
+    if (s.progress < 1) s.progress = Math.min(1, s.progress + dt / 0.2);
+    s.life -= dt;
+    if (s.life <= 0) { shengKeStrokes.splice(i, 1); }
+  }
+}
+
+function drawShengKeStrokes(): void {
+  for (const s of shengKeStrokes) {
+    const fadeAlpha = Math.min(1, s.life * 2); // fade out in last 0.5s
+    ctx.save();
+    ctx.globalAlpha = fadeAlpha * 0.9;
+    // Draw ink brush stroke from source to (source + progress * delta)
+    const endX = s.sx + (s.tx - s.sx) * s.progress;
+    const endY = s.sy + (s.ty - s.sy) * s.progress;
+    // Increasing lineWidth from 1 to 4 as it draws
+    const lw = 1 + s.progress * 3;
+    // Main golden stroke
+    ctx.beginPath();
+    ctx.moveTo(s.sx, s.sy);
+    // Slight curve for ink feel
+    const midX = (s.sx + endX) / 2 + (Math.random() - 0.5) * 2;
+    const midY = (s.sy + endY) / 2 - 3;
+    ctx.quadraticCurveTo(midX, midY, endX, endY);
+    ctx.strokeStyle = '#ffd700';
+    ctx.lineWidth = lw;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    // Inner bright core (thinner)
+    ctx.beginPath();
+    ctx.moveTo(s.sx, s.sy);
+    ctx.quadraticCurveTo(midX, midY, endX, endY);
+    ctx.strokeStyle = '#fff8dd';
+    ctx.lineWidth = lw * 0.4;
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// Update sheng-ke delays; when delay hits 0, destroy the gem (triggers cascade naturally)
+function updateShengKe(dt: number): void {
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const g = grid[r][c];
+    if (!g || !g.shengKeTarget) continue;
+    g.shengKeDelay -= dt;
+    if (g.shengKeDelay <= 0) {
+      g.shengKeTarget = false;
+      g.removing = true;
+      g.destroyFlash = 0.06;
+      g.hitstop = 0.04;
+      g.hitstopParticlesSpawned = false;
+
+      // Golden particles for sheng-ke destruction
+      const px = cellX(c) + CELL / 2, py = cellY(r) + CELL / 2;
+      for (let i = 0; i < 8; i++) {
+        if (particles.length >= 300) break;
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 60 + Math.random() * 120;
+        const goldLife = 0.4 + Math.random() * 0.3;
+        particles.push({
+          x: px, y: py,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - 20,
+          life: goldLife, maxLife: goldLife,
+          color: Math.random() > 0.5 ? '#ffd700' : '#ffee88',
+          size: 2 + Math.random() * 3,
+          type: 'star',
+          rotation: Math.random() * Math.PI * 2,
+          rotSpeed: (Math.random() - 0.5) * 8,
+        });
+      }
+
+      // Score bonus
+      score += 500;
+      levelScore += 500;
+      addFloatingText(px, py - 15, '+500', '#ffd700', 14);
+
+      // Cascade counter increment
+      cascadeLevel++;
+    }
+  }
+}
+
+function hasShengKePending(): boolean {
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    if (grid[r][c]?.shengKeTarget) return true;
+  }
+  return false;
 }
 
 // ============================================================================
@@ -1287,7 +1535,7 @@ function applyGravity(): number {
           // Stagger: lower rows get a slight head start (negative vy = above current pos)
           // Row-based stagger: gems landing in lower rows get slightly less initial offset
           // This creates a cascade wave where bottom gems land first
-          const stagger = (ROWS - 1 - writeR) * 3; // lower rows have less delay
+          const stagger = writeR * 3; // top rows (small writeR) have less delay, fall first
           grid[writeR][c]!.vy = (r - writeR) * (CELL + GAP) + stagger;
           grid[writeR][c]!.landBounce = 1.0;
           grid[writeR][c]!.dustSpawned = false;
@@ -1302,7 +1550,7 @@ function applyGravity(): number {
       emptyCount++;
       const gem = makeGem(randomType());
       // Staggered spawn: gems for lower target rows get less initial offset
-      const stagger = (ROWS - 1 - r) * 3;
+      const stagger = r * 3; // top rows fall first
       gem.vy = -(emptyCount) * (CELL + GAP) - 20 + stagger;
       gem.spawning = true;
       gem.landBounce = 1.0;
@@ -1318,46 +1566,64 @@ function applyGravity(): number {
 // VALID MOVES CHECK
 // ============================================================================
 
+// Lightweight match check: only checks if a swap at (r,c) with neighbor creates a match
+// by examining the 2 rows and 2 columns around the swapped positions.
+function wouldMatch(r1: number, c1: number, r2: number, c2: number): boolean {
+  gridSwap(r1, c1, r2, c2);
+  const result = checkMatchAt(r1, c1) || checkMatchAt(r2, c2);
+  gridSwap(r1, c1, r2, c2);
+  return result;
+}
+
+function checkMatchAt(r: number, c: number): boolean {
+  const g = grid[r][c];
+  if (!g || g.type < 0 || g.removing || g.spawning) return false;
+  const t = g.type;
+  // Check horizontal run through (r,c)
+  let left = c, right = c;
+  while (left > 0 && grid[r][left - 1]?.type === t && !grid[r][left - 1]!.removing && !grid[r][left - 1]!.spawning) left--;
+  while (right < COLS - 1 && grid[r][right + 1]?.type === t && !grid[r][right + 1]!.removing && !grid[r][right + 1]!.spawning) right++;
+  if (right - left + 1 >= 3) return true;
+  // Check vertical run through (r,c)
+  let top = r, bottom = r;
+  while (top > 0 && grid[top - 1]?.[c]?.type === t && !grid[top - 1][c]!.removing && !grid[top - 1][c]!.spawning) top--;
+  while (bottom < ROWS - 1 && grid[bottom + 1]?.[c]?.type === t && !grid[bottom + 1][c]!.removing && !grid[bottom + 1][c]!.spawning) bottom++;
+  if (bottom - top + 1 >= 3) return true;
+  return false;
+}
+
 function hasValidMoves(): boolean {
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-    if (c < COLS - 1) {
-      gridSwap(r, c, r, c + 1);
-      const has = findMatches().length > 0;
-      gridSwap(r, c, r, c + 1);
-      if (has) return true;
-    }
-    if (r < ROWS - 1) {
-      gridSwap(r, c, r + 1, c);
-      const has = findMatches().length > 0;
-      gridSwap(r, c, r + 1, c);
-      if (has) return true;
-    }
+    if (c < COLS - 1 && wouldMatch(r, c, r, c + 1)) return true;
+    if (r < ROWS - 1 && wouldMatch(r, c, r + 1, c)) return true;
   }
   return false;
 }
 
 function findHint(): void {
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-    if (c < COLS - 1) {
-      gridSwap(r, c, r, c + 1);
-      if (findMatches().length > 0) { gridSwap(r, c, r, c + 1); hintR1 = r; hintC1 = c; hintR2 = r; hintC2 = c + 1; return; }
-      gridSwap(r, c, r, c + 1);
+    if (c < COLS - 1 && wouldMatch(r, c, r, c + 1)) {
+      hintR1 = r; hintC1 = c; hintR2 = r; hintC2 = c + 1; return;
     }
-    if (r < ROWS - 1) {
-      gridSwap(r, c, r + 1, c);
-      if (findMatches().length > 0) { gridSwap(r, c, r + 1, c); hintR1 = r; hintC1 = c; hintR2 = r + 1; hintC2 = c; return; }
-      gridSwap(r, c, r + 1, c);
+    if (r < ROWS - 1 && wouldMatch(r, c, r + 1, c)) {
+      hintR1 = r; hintC1 = c; hintR2 = r + 1; hintC2 = c; return;
     }
   }
   hintR1 = -1;
 }
 
 function shuffleBoard(): void {
-  const types: number[] = [];
-  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c]) types.push(grid[r][c]!.type);
-  for (let i = types.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [types[i], types[j]] = [types[j], types[i]]; }
-  let idx = 0;
-  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c]) { grid[r][c]!.type = types[idx++]; grid[r][c]!.special = SP_NONE; }
+  // Collect all gem positions and their data, preserving specials
+  const gems: {gem: Gem, r: number, c: number}[] = [];
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c]) gems.push({gem: grid[r][c]!, r, c});
+  // Fisher-Yates shuffle of positions
+  const positions = gems.map(g => ({r: g.r, c: g.c}));
+  for (let i = positions.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [positions[i], positions[j]] = [positions[j], positions[i]]; }
+  // Clear grid, then place gems at shuffled positions (preserving specials)
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) grid[r][c] = null;
+  for (let i = 0; i < gems.length; i++) {
+    grid[positions[i].r][positions[i].c] = gems[i].gem;
+  }
   SFX.boardShuffle();
 }
 
@@ -1366,7 +1632,7 @@ function shuffleBoard(): void {
 // ============================================================================
 
 function getLevelDef(lvl: number): LevelDef {
-  return { moves: 20 + Math.floor(lvl / 3) * 2, target: Math.floor(300 * Math.pow(1.35, lvl - 1)) };
+  return { moves: 20 + Math.floor(lvl / 3) * 2, target: Math.floor(300 * Math.min(3, 1 + (lvl - 1) * 0.25)) };
 }
 
 function startLevel(lvl: number): void {
@@ -1378,7 +1644,7 @@ function startLevel(lvl: number): void {
   boardState = 'idle'; selectedR = -1; selectedC = -1;
   hintTimer = 0; hintR1 = -1;
   comboText = ''; comboTextTimer = 0; pendingSpecials = [];
-  bonusPhase = 'placing';
+  bonusPhase = 'none';
   dragActive = false; dragExecuted = false;
 }
 
@@ -1386,9 +1652,14 @@ function startGame(): void {
   score = 0; totalScore = 0; level = 1; displayScore = 0;
   startLevel(1);
   screen = 'playing';
+  paused = false;
+  // Restart drone for gameplay
+  if (audioInited) startDrone();
 }
 
 function checkLevelComplete(): void {
+  // Don't check level complete during bonus phase
+  if (bonusPhase !== 'none') return;
   const def = getLevelDef(level);
   if (levelScore >= def.target) {
     bonusMoves = movesLeft;
@@ -1399,13 +1670,61 @@ function checkLevelComplete(): void {
   }
 }
 
+function spawnConfetti(): void {
+  confetti = [];
+  const colors = ['#ff4444', '#ffdd44', '#44ff88', '#44aaff', '#ff44ff', '#ffffff', '#ffd700'];
+  for (let i = 0; i < 80; i++) {
+    confetti.push({
+      x: W * 0.3 + Math.random() * W * 0.4,
+      y: 150 + Math.random() * 50,
+      vx: (Math.random() - 0.5) * 300,
+      vy: -(200 + Math.random() * 300),
+      rot: Math.random() * Math.PI * 2,
+      rotV: (Math.random() - 0.5) * 15,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      w: 4 + Math.random() * 6,
+      h: 2 + Math.random() * 3,
+      life: 3 + Math.random() * 2,
+    });
+  }
+}
+
+function updateConfetti(dt: number): void {
+  for (let i = confetti.length - 1; i >= 0; i--) {
+    const c = confetti[i];
+    c.life -= dt;
+    if (c.life <= 0) { confetti.splice(i, 1); continue; }
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+    c.vy += 400 * dt; // gravity
+    c.vx *= 0.99;
+    c.rot += c.rotV * dt;
+    // Flutter effect
+    c.vx += Math.sin(c.rot * 3) * 30 * dt;
+  }
+}
+
+function drawConfetti(): void {
+  for (const c of confetti) {
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, c.life);
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.rot);
+    ctx.fillStyle = c.color;
+    ctx.fillRect(-c.w / 2, -c.h / 2, c.w, c.h);
+    ctx.restore();
+  }
+}
+
 function finishLevel(): void {
+  stopDrone();
   const def = getLevelDef(level);
   stars = 1;
   if (levelScore >= def.target * 1.5) stars = 2;
   if (levelScore >= def.target * 2.0) stars = 3;
   totalScore += levelScore;
   SFX.levelComplete();
+  spawnConfetti();
   screen = 'levelComplete';
   screenTransition = 1.0;
   saveHighScore();
@@ -1416,6 +1735,7 @@ function finishLevel(): void {
 function endGame(): void {
   totalScore += levelScore;
   saveHighScore();
+  stopDrone();
   SFX.gameOver();
   screen = 'gameOver'; screenTransition = 1.0;
   leaderboard.push({ name: passport.playerName, score: totalScore, level });
@@ -1481,9 +1801,46 @@ function executeSwap(r1: number, c1: number, r2: number, c2: number): void {
   selectedR = -1; selectedC = -1;
 }
 
+function toggleMute(): void {
+  muted = !muted;
+  if (masterGain) masterGain.gain.value = muted ? 0 : 0.5;
+  try { localStorage.setItem('shattered_stars_muted', muted ? '1' : '0'); } catch { /* ignore */ }
+}
+
 function handleTap(px: number, py: number): void {
-  if (screen === 'title') { SFX.uiTap(); startGame(); return; }
-  if (screen === 'levelComplete') { SFX.uiTap(); startLevel(level + 1); screen = 'playing'; return; }
+  // Check mute button on title screen
+  if (screen === 'title') {
+    const muteBtnX = W - 30, muteBtnY = 30;
+    if (Math.abs(px - muteBtnX) < 28 && Math.abs(py - muteBtnY) < 28) {
+      muteBtnPressTimer = 0.1; toggleMute(); return;
+    }
+  }
+
+  // Check pause/mute buttons on playing screen
+  if (screen === 'playing') {
+    // Pause button
+    const pauseBtnX = W - 28, pauseBtnY = 18;
+    if (Math.abs(px - pauseBtnX) < 28 && Math.abs(py - pauseBtnY) < 28) {
+      pauseBtnPressTimer = 0.1; paused = !paused; return;
+    }
+    // Mute button
+    const muteBtnX = W - 60, muteBtnY = 18;
+    if (Math.abs(px - muteBtnX) < 28 && Math.abs(py - muteBtnY) < 28) {
+      muteBtnPressTimer = 0.1; toggleMute(); return;
+    }
+    // If paused, tap anywhere else to unpause
+    if (paused) { paused = false; return; }
+  }
+
+  if (screen === 'title') {
+    // Only start game if tap is within the "开始冒险" button bounds
+    const btnY = 430;
+    if (px >= W / 2 - 100 && px <= W / 2 + 100 && py >= btnY - 25 && py <= btnY + 25) {
+      SFX.uiTap(); startGame(); return;
+    }
+    return;
+  }
+  if (screen === 'levelComplete') { SFX.uiTap(); startLevel(level + 1); screen = 'playing'; if (audioInited) startDrone(); return; }
   if (screen === 'gameOver') { SFX.uiTap(); screen = 'title'; return; }
   if (screen !== 'playing') return;
   if (boardState !== 'idle' && boardState !== 'selected') return;
@@ -1545,6 +1902,26 @@ canvas.addEventListener('pointermove', (e) => {
 
   // Threshold: half a cell size to trigger swap
   const threshold = CELL * 0.4;
+
+  // Preview: show which gems would match while dragging (before threshold)
+  if (dist >= threshold * 0.5 && dist < threshold) {
+    let sr = 0, sc = 0;
+    if (Math.abs(dx) > Math.abs(dy)) sc = dx > 0 ? 1 : -1;
+    else sr = dy > 0 ? 1 : -1;
+    const nr = dragStartR + sr, nc = dragStartC + sc;
+    if (inBounds(nr, nc)) {
+      // Simulate swap and find matches
+      gridSwap(dragStartR, dragStartC, nr, nc);
+      const previewMatches = findMatches();
+      gridSwap(dragStartR, dragStartC, nr, nc); // swap back
+      previewCells = [];
+      for (const m of previewMatches) {
+        for (const cell of m.cells) previewCells.push(cell);
+      }
+      previewTimer = 0.3;
+    }
+  }
+
   if (dist >= threshold) {
     // Determine direction
     let sr = 0, sc = 0;
@@ -1552,6 +1929,7 @@ canvas.addEventListener('pointermove', (e) => {
     else sr = dy > 0 ? 1 : -1;
     const nr = dragStartR + sr, nc = dragStartC + sc;
     if (inBounds(nr, nc) && selectedR === dragStartR && selectedC === dragStartC) {
+      previewCells = []; previewTimer = 0; // Clear preview on swap
       executeSwap(dragStartR, dragStartC, nr, nc);
       dragExecuted = true;
       tapConsumed = true;
@@ -1577,6 +1955,10 @@ canvas.addEventListener('pointerup', (e) => {
 }, { passive: false });
 
 canvas.addEventListener('pointerleave', () => {
+  dragActive = false;
+});
+
+canvas.addEventListener('pointercancel', () => {
   dragActive = false;
 });
 
@@ -1635,12 +2017,14 @@ function drawGemFire(r: number, shimmer: number): void {
   ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.clip();
   for (let i = 0; i < 4; i++) {
     const baseX = -r * 0.4 + i * r * 0.27;
-    const h = r * (0.3 + Math.sin(shimmer * 3 + i * 1.7) * 0.15 + Math.random() * 0.05);
+    const h = r * (0.3 + Math.sin(shimmer * 3 + i * 1.7) * 0.15 + Math.sin(shimmer * 10 + i * 3) * 0.025 + 0.025);
     ctx.beginPath();
     ctx.moveTo(baseX - r * 0.08, 0);
     ctx.bezierCurveTo(baseX - r * 0.06, -h * 0.5, baseX + r * 0.06, -h * 0.7, baseX, -h);
     ctx.bezierCurveTo(baseX + r * 0.06, -h * 0.7, baseX + r * 0.1, -h * 0.3, baseX + r * 0.08, 0);
-    ctx.fillStyle = `rgba(255, ${180 + Math.floor(Math.random() * 60)}, 0, ${0.4 + Math.random() * 0.3})`;
+    const flameG = 180 + Math.floor(Math.sin(shimmer * 8 + i * 2.3) * 30 + 30);
+    const flameA = 0.4 + Math.sin(shimmer * 6 + i * 1.9) * 0.15 + 0.15;
+    ctx.fillStyle = `rgba(255, ${flameG}, 0, ${flameA})`;
     ctx.fill();
   }
   ctx.restore();
@@ -1883,8 +2267,8 @@ function drawGem(x: number, y: number, gem: Gem, size: number): void {
   const isSelected = (boardState === 'selected' && selectedR >= 0 &&
     Math.abs(y - cellY(selectedR)) < 2 && Math.abs(x - cellX(selectedC)) < 2);
 
-  // Idle breathing pulse for all gems
-  const breathe = 1.0 + Math.sin(gem.shimmer) * 0.015;
+  // Idle breathing pulse for all gems — phase-offset per gem position for wave effect
+  const breathe = 1.0 + Math.sin(gem.shimmer * 2 + gem.idlePhase) * 0.02;
 
   // Idle float: subtle +-1px vertical, unique phase per gem
   const idleFloat = (!gem.removing && !gem.spawning && gem.landBounce <= 0)
@@ -1920,13 +2304,14 @@ function drawGem(x: number, y: number, gem: Gem, size: number): void {
     pulseScale = 1.0 + Math.sin(boardPulseTimer * Math.PI * 4) * 0.05;
   }
 
-  // Board slam offset (cascade 5+)
+  // Board slam offset (cascade 4+): slam down 5px then spring back
   let slamOffset = 0;
   if (boardSlamTimer > 0 && !gem.removing) {
     if (boardSlamPhase === 'lift') {
-      slamOffset = -Math.sin(boardSlamTimer * Math.PI * 2) * 4;
+      slamOffset = -Math.sin(boardSlamTimer * Math.PI * 2) * 3;
     } else if (boardSlamPhase === 'slam') {
-      slamOffset = Math.sin(boardSlamTimer * Math.PI * 4) * boardSlamTimer * 3;
+      // Quick slam down then spring back
+      slamOffset = Math.sin(boardSlamTimer * Math.PI * 5) * boardSlamTimer * 5;
     }
   }
 
@@ -1943,38 +2328,41 @@ function drawGem(x: number, y: number, gem: Gem, size: number): void {
   const r = s * 0.42;
   const type = gem.type;
 
-  // Drop shadow
+  // Drop shadow (no shadowBlur for perf — use offset fill instead)
   ctx.save();
-  ctx.shadowBlur = 10; ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowOffsetY = 3;
+  ctx.globalAlpha = 0.3;
+  ctx.fillStyle = '#000000';
   if (type === METAL) {
-    // Octagon shadow
     ctx.beginPath();
     for (let i = 0; i < 8; i++) {
       const a = (i / 8) * Math.PI * 2 - Math.PI / 8;
-      if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
-      else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+      if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r + 3);
+      else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r + 3);
     }
     ctx.closePath();
   } else if (type === EARTH) {
-    // Hexagon shadow
     ctx.beginPath();
     for (let i = 0; i < 6; i++) {
       const a = (i / 6) * Math.PI * 2 - Math.PI / 6;
-      if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
-      else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+      if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r + 3);
+      else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r + 3);
     }
     ctx.closePath();
   } else {
-    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(0, 3, r, 0, Math.PI * 2);
   }
-  ctx.fillStyle = '#00000001'; ctx.fill();
+  ctx.fill();
   ctx.restore();
 
-  // Hitstop + destroy flash: bright white during hitstop, then shatter
+  // Hitstop + destroy flash: pop expansion (120%) then shatter
   if (gem.hitstop > 0) {
+    // Pop expansion: scale up to 120% during hitstop for satisfying "pop" feel
+    const popProgress = 1 - (gem.hitstop / 0.06); // 0 -> 1 over hitstop duration
+    const popScale = 1.0 + popProgress * 0.2; // 1.0 -> 1.2
+    ctx.scale(popScale, popScale);
     // Frozen bright white during hitstop
-    ctx.beginPath(); ctx.arc(0, 0, r * 1.3, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255, 255, 255, ${0.7 + gem.hitstop * 5})`;
+    ctx.beginPath(); ctx.arc(0, 0, r * 1.1, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255, 255, 255, ${0.5 + gem.hitstop * 5})`;
     ctx.fill();
   } else if (gem.destroyFlash > 0) {
     ctx.beginPath(); ctx.arc(0, 0, r * 1.2, 0, Math.PI * 2);
@@ -1997,31 +2385,17 @@ function drawGem(x: number, y: number, gem: Gem, size: number): void {
     ctx.fillStyle = grad; ctx.fill();
   }
 
-  // Outer glow
+  // Outer glow — use radial gradient instead of shadowBlur for perf
   if (type >= 0 && type < 5) {
     ctx.save();
-    ctx.shadowBlur = 10 + Math.sin(gem.shimmer) * 3;
-    ctx.shadowColor = ELEM_GLOW[type];
-    if (type === METAL) {
-      ctx.beginPath();
-      for (let i = 0; i < 8; i++) {
-        const a = (i / 8) * Math.PI * 2 - Math.PI / 8;
-        if (i === 0) ctx.moveTo(Math.cos(a) * r * 0.8, Math.sin(a) * r * 0.8);
-        else ctx.lineTo(Math.cos(a) * r * 0.8, Math.sin(a) * r * 0.8);
-      }
-      ctx.closePath();
-    } else if (type === EARTH) {
-      ctx.beginPath();
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * Math.PI * 2 - Math.PI / 6;
-        if (i === 0) ctx.moveTo(Math.cos(a) * r * 0.8, Math.sin(a) * r * 0.8);
-        else ctx.lineTo(Math.cos(a) * r * 0.8, Math.sin(a) * r * 0.8);
-      }
-      ctx.closePath();
-    } else {
-      ctx.beginPath(); ctx.arc(0, 0, r * 0.8, 0, Math.PI * 2);
-    }
-    ctx.fillStyle = 'rgba(0,0,0,0)'; ctx.fill();
+    const glowAlpha = 0.2 + Math.sin(gem.shimmer) * 0.06;
+    const outerGlow = ctx.createRadialGradient(0, 0, r * 0.7, 0, 0, r * 1.2);
+    outerGlow.addColorStop(0, 'rgba(0,0,0,0)');
+    outerGlow.addColorStop(0.7, ELEM_GLOW[type].replace('88', Math.round(glowAlpha * 255).toString(16).padStart(2, '0')));
+    outerGlow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = outerGlow;
+    ctx.beginPath(); ctx.arc(0, 0, r * 1.2, 0, Math.PI * 2);
+    ctx.fill();
     ctx.restore();
   }
 
@@ -2033,33 +2407,20 @@ function drawGem(x: number, y: number, gem: Gem, size: number): void {
     ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
   }
 
-  // Selected glow effect: pulsing glow ring
+  // Selected glow effect: pulsing glow ring (no shadowBlur for perf)
   if (isSelected) {
     const glowPulse = 0.5 + Math.sin(frameCount * 0.12) * 0.3;
     const glowRadius = r * (1.1 + Math.sin(frameCount * 0.08) * 0.05);
-    // Outer glow ring
+    // Radial glow halo instead of shadowBlur
     ctx.save();
-    ctx.shadowBlur = 20 + Math.sin(frameCount * 0.1) * 8;
-    ctx.shadowColor = `rgba(255, 255, 255, ${glowPulse})`;
-    if (type === METAL) {
-      ctx.beginPath();
-      for (let i = 0; i < 8; i++) {
-        const a = (i / 8) * Math.PI * 2 - Math.PI / 8;
-        if (i === 0) ctx.moveTo(Math.cos(a) * glowRadius, Math.sin(a) * glowRadius);
-        else ctx.lineTo(Math.cos(a) * glowRadius, Math.sin(a) * glowRadius);
-      }
-      ctx.closePath();
-    } else if (type === EARTH) {
-      ctx.beginPath();
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * Math.PI * 2 - Math.PI / 6;
-        if (i === 0) ctx.moveTo(Math.cos(a) * glowRadius, Math.sin(a) * glowRadius);
-        else ctx.lineTo(Math.cos(a) * glowRadius, Math.sin(a) * glowRadius);
-      }
-      ctx.closePath();
-    } else {
-      ctx.beginPath(); ctx.arc(0, 0, glowRadius, 0, Math.PI * 2);
-    }
+    const selGlow = ctx.createRadialGradient(0, 0, glowRadius - 4, 0, 0, glowRadius + 8);
+    selGlow.addColorStop(0, 'rgba(0,0,0,0)');
+    selGlow.addColorStop(0.4, `rgba(255,255,255,${glowPulse * 0.5})`);
+    selGlow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = selGlow;
+    ctx.beginPath(); ctx.arc(0, 0, glowRadius + 8, 0, Math.PI * 2); ctx.fill();
+    // Outer glow ring stroke
+    ctx.beginPath(); ctx.arc(0, 0, glowRadius, 0, Math.PI * 2);
     ctx.strokeStyle = `rgba(255, 255, 255, ${0.6 + glowPulse * 0.4})`;
     ctx.lineWidth = 2 + glowPulse;
     ctx.stroke();
@@ -2071,6 +2432,25 @@ function drawGem(x: number, y: number, gem: Gem, size: number): void {
     ctx.strokeStyle = type >= 0 && type < 5 ? ELEM_COLORS[type][1] : '#ffffff';
     ctx.lineWidth = 1;
     ctx.stroke();
+    ctx.restore();
+  }
+
+  // Sheng-Ke target: pulsing golden glow border
+  if (gem.shengKeTarget) {
+    const skPulse = 0.5 + Math.sin(frameCount * 0.2) * 0.3;
+    ctx.save();
+    ctx.shadowBlur = 15 + skPulse * 10;
+    ctx.shadowColor = '#ffd700';
+    ctx.beginPath(); ctx.arc(0, 0, r * 1.05, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(255, 215, 0, ${0.6 + skPulse * 0.4})`;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.restore();
+    // Golden fill overlay
+    ctx.save();
+    ctx.globalAlpha = 0.15 + skPulse * 0.15;
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffd700'; ctx.fill();
     ctx.restore();
   }
 
@@ -2144,9 +2524,9 @@ function drawBoard(): void {
 
   // Selection highlight
   if (boardState === 'selected' && selectedR >= 0) {
-    ctx.save(); ctx.shadowBlur = 12; ctx.shadowColor = '#ffffff88';
+    ctx.save();
     drawRoundRect(cellX(selectedC) - 2, cellY(selectedR) - 2, CELL + 4, CELL + 4, 8);
-    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 2.5; ctx.stroke();
     ctx.restore();
   }
 
@@ -2157,6 +2537,18 @@ function drawBoard(): void {
     for (const [hr, hc] of [[hintR1, hintC1], [hintR2, hintC2]]) {
       drawRoundRect(cellX(hc) - 1, cellY(hr) - 1, CELL + 2, CELL + 2, 7);
       ctx.strokeStyle = '#ffdd44'; ctx.lineWidth = 2; ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Match preview highlight: flash gems that would match
+  if (previewCells.length > 0 && previewTimer > 0) {
+    const previewPulse = 0.4 + Math.sin(frameCount * 0.2) * 0.3;
+    ctx.save(); ctx.globalAlpha = previewPulse;
+    for (const cell of previewCells) {
+      drawRoundRect(cellX(cell.c) - 1, cellY(cell.r) - 1, CELL + 2, CELL + 2, 7);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.2)'; ctx.fill();
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.stroke();
     }
     ctx.restore();
   }
@@ -2180,11 +2572,30 @@ function drawBoard(): void {
     ctx.translate(-(GRID_X + GRID_W / 2), -(GRID_Y + GRID_H / 2));
   }
 
-  // Draw gems
+  // Draw gems with motion blur trails for falling gems
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
     const gem = grid[r][c];
     if (!gem) continue;
-    drawGem(cellX(c) + gem.vx, cellY(r) + gem.vy, gem, CELL);
+    const gx = cellX(c) + gem.vx;
+    const gy = cellY(r) + gem.vy;
+    // Motion blur: draw faint stretched copies above falling gems
+    if (Math.abs(gem.vy) > 15 && !gem.removing) {
+      const blurCount = 3;
+      for (let b = 1; b <= blurCount; b++) {
+        ctx.save();
+        ctx.globalAlpha = 0.12 / b;
+        const offsetY = -b * Math.sign(gem.vy) * (6 + Math.abs(gem.vy) * 0.04);
+        // Stretch vertically
+        const stretchY = 1.0 + b * 0.08;
+        const stretchX = 1.0 - b * 0.03;
+        ctx.translate(gx + CELL / 2, gy + CELL / 2 + offsetY);
+        ctx.scale(stretchX, stretchY);
+        ctx.translate(-(gx + CELL / 2), -(gy + CELL / 2 + offsetY));
+        drawGem(gx, gy + offsetY, gem, CELL);
+        ctx.restore();
+      }
+    }
+    drawGem(gx, gy, gem, CELL);
   }
 
   if (boardBreathMag > 0) {
@@ -2234,6 +2645,32 @@ function drawHUD(): void {
   drawTextWithShadow('步', W - 50, 48, 12, '#88aacc');
   drawTextWithShadow(`最高: ${highScore}`, 60, 48, 11, '#666688');
 
+  // Pause button (top-right)
+  ctx.save();
+  ctx.globalAlpha = 0.7;
+  ctx.fillStyle = '#ffffff';
+  const pauseBtnX = W - 28, pauseBtnY = 18;
+  const pauseScale = pauseBtnPressTimer > 0 ? 0.9 : 1.0;
+  ctx.translate(pauseBtnX, pauseBtnY);
+  ctx.scale(pauseScale, pauseScale);
+  // Two vertical bars for pause icon
+  ctx.fillRect(-6, -8, 4, 16);
+  ctx.fillRect(2, -8, 4, 16);
+  ctx.restore();
+
+  // Mute button (next to pause)
+  ctx.save();
+  ctx.globalAlpha = 0.7;
+  const muteBtnX = W - 60, muteBtnY = 18;
+  const muteScale = muteBtnPressTimer > 0 ? 0.9 : 1.0;
+  ctx.translate(muteBtnX, muteBtnY);
+  ctx.scale(muteScale, muteScale);
+  ctx.font = 'bold 16px serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = muted ? '#ff6644' : '#ffffff';
+  ctx.fillText(muted ? '\u2717' : '\u266B', 0, 0);
+  ctx.restore();
+
   // Multiplier display during cascades — large, glowing, center-screen
   if (multiplierTimer > 0 && multiplierDisplay >= 2) {
     const mLife = Math.min(1, multiplierTimer / 0.5);
@@ -2259,7 +2696,34 @@ function drawHUD(): void {
 // ============================================================================
 
 function drawParticles(): void {
+  // Batch simple circle particles (trail, anticipation) by color to reduce state changes
+  const circleBatches = new Map<string, {x: number, y: number, r: number, alpha: number}[]>();
+  const complexParticles: Particle[] = [];
+
   for (const p of particles) {
+    const life = p.life / p.maxLife;
+    if (p.type === 'trail' || p.type === 'anticipation') {
+      const key = p.color;
+      if (!circleBatches.has(key)) circleBatches.set(key, []);
+      circleBatches.get(key)!.push({ x: p.x, y: p.y, r: p.size * life, alpha: life });
+    } else {
+      complexParticles.push(p);
+    }
+  }
+
+  // Draw batched circles
+  for (const [color, batch] of circleBatches) {
+    ctx.fillStyle = color;
+    for (const b of batch) {
+      ctx.save();
+      ctx.globalAlpha = b.alpha;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // Draw complex particles
+  for (const p of complexParticles) {
     const life = p.life / p.maxLife;
     ctx.save(); ctx.globalAlpha = life;
 
@@ -2294,7 +2758,7 @@ function drawParticles(): void {
       ctx.fillStyle = grad; ctx.beginPath();
       ctx.arc(p.x, p.y, p.size * (0.5 + life * 0.5), 0, Math.PI * 2); ctx.fill();
     } else if (p.type === 'star') {
-      ctx.fillStyle = '#ffffff'; ctx.shadowBlur = 6; ctx.shadowColor = p.color;
+      ctx.fillStyle = '#ffffff';
       const sz = p.size * life;
       ctx.beginPath(); ctx.moveTo(p.x, p.y - sz); ctx.lineTo(p.x + sz * 0.3, p.y);
       ctx.lineTo(p.x, p.y + sz); ctx.lineTo(p.x - sz * 0.3, p.y); ctx.closePath(); ctx.fill();
@@ -2356,9 +2820,6 @@ function drawParticles(): void {
       ctx.closePath();
       ctx.fillStyle = p.color; ctx.fill();
       ctx.restore();
-    } else if (p.type === 'trail') {
-      ctx.fillStyle = p.color;
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.size * life, 0, Math.PI * 2); ctx.fill();
     } else if (p.type === 'dust') {
       // Soft dust puff
       const dustAlpha = life * 0.6;
@@ -2368,12 +2829,6 @@ function drawParticles(): void {
       grad.addColorStop(1, 'rgba(200, 200, 220, 0)');
       ctx.fillStyle = grad;
       ctx.beginPath(); ctx.arc(p.x, p.y, p.size * (1 + (1 - life) * 0.5), 0, Math.PI * 2); ctx.fill();
-    } else if (p.type === 'anticipation') {
-      // Small white converging dot
-      ctx.fillStyle = '#ffffff';
-      ctx.shadowBlur = 4; ctx.shadowColor = '#ffffff';
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.size * life, 0, Math.PI * 2); ctx.fill();
-      ctx.shadowBlur = 0;
     }
     ctx.restore();
   }
@@ -2400,28 +2855,51 @@ function drawComboText(): void {
   const appear = 1 - life; // 0 at start -> 1 at end
   let scale: number;
   if (appear < 0.15) {
-    // Quick overshoot: 0 -> 1.4
     scale = (appear / 0.15) * 1.4;
   } else if (appear < 0.3) {
-    // Settle back: 1.4 -> 0.95
     const t = (appear - 0.15) / 0.15;
     scale = 1.4 - t * 0.45;
   } else if (appear < 0.4) {
-    // Small bounce: 0.95 -> 1.05
     const t = (appear - 0.3) / 0.1;
     scale = 0.95 + t * 0.1;
   } else {
-    // Settle: 1.05 -> 1.0
     const t = Math.min(1, (appear - 0.4) / 0.1);
     scale = 1.05 - t * 0.05;
   }
-  ctx.translate(W / 2, GRID_Y - 40); ctx.scale(scale, scale);
-  // Dramatic glow
-  ctx.shadowBlur = 30; ctx.shadowColor = '#ffdd44';
-  drawText(comboText, 0, 0, 36, '#ffdd44');
-  ctx.shadowBlur = 15; ctx.shadowColor = '#ff8800';
-  drawText(comboText, 0, 0, 36, '#ffffff');
-  ctx.shadowBlur = 0;
+
+  // Escalating size based on combo level: 24 -> 36 -> 48
+  const comboSize = comboTextLevel <= 2 ? 24 : comboTextLevel <= 4 ? 36 : 48;
+
+  ctx.translate(W / 2, GRID_Y - 40);
+
+  // Escalating rotation for level 5+ (bounce + rotation)
+  if (comboTextLevel >= 5) {
+    const rotAmount = Math.sin(appear * Math.PI * 4) * 0.08 * life;
+    ctx.rotate(rotAmount);
+  }
+
+  ctx.scale(scale, scale);
+
+  // Escalating color: white -> gold -> rainbow gradient
+  if (comboTextLevel >= 5) {
+    // Rainbow gradient text
+    const hue = (frameCount * 5) % 360;
+    ctx.shadowBlur = 30; ctx.shadowColor = `hsla(${hue}, 100%, 60%, 0.8)`;
+    drawText(comboText, 0, 0, comboSize, `hsl(${hue}, 100%, 70%)`);
+    ctx.shadowBlur = 15; ctx.shadowColor = `hsla(${(hue + 180) % 360}, 100%, 50%, 0.6)`;
+    drawText(comboText, 0, 0, comboSize, '#ffffff');
+    ctx.shadowBlur = 0;
+  } else if (comboTextLevel >= 3) {
+    // Gold glow
+    ctx.shadowBlur = 25; ctx.shadowColor = '#ffdd44';
+    drawText(comboText, 0, 0, comboSize, '#ffdd44');
+    ctx.shadowBlur = 12; ctx.shadowColor = '#ff8800';
+    drawText(comboText, 0, 0, comboSize, '#ffffff');
+    ctx.shadowBlur = 0;
+  } else {
+    // White/simple
+    drawTextWithShadow(comboText, 0, 0, comboSize, '#ffffff');
+  }
   ctx.restore();
 }
 
@@ -2477,12 +2955,13 @@ function drawTitle(): void {
     drawGem(gx, gy, gem, CELL);
 
     // Particle trail behind orbiting gems
-    if (frameCount % 3 === 0) {
+    if (frameCount % 3 === 0 && particles.length < 300) {
       const color = ELEM_COLORS[i][0];
+      const trailLife = 0.5 + Math.random() * 0.5;
       particles.push({
         x: gx + CELL / 2, y: gy + CELL / 2,
         vx: (Math.random() - 0.5) * 10, vy: (Math.random() - 0.5) * 10,
-        life: 0.5 + Math.random() * 0.5, maxLife: 0.5 + Math.random() * 0.5,
+        life: trailLife, maxLife: trailLife,
         color, size: 1 + Math.random() * 2, type: 'trail',
       });
     }
@@ -2500,7 +2979,7 @@ function drawTitle(): void {
   ctx.save();
   ctx.globalAlpha = 0.5 + Math.sin(frameCount * 0.1) * 0.3;
   ctx.beginPath(); ctx.arc(shimmerX, 170, 3, 0, Math.PI * 2);
-  ctx.fillStyle = '#ffffff'; ctx.shadowBlur = 8; ctx.shadowColor = '#ffffff';
+  ctx.fillStyle = '#ffffff';
   ctx.fill();
   ctx.restore();
 
@@ -2514,9 +2993,8 @@ function drawTitle(): void {
   const btnGrad = ctx.createLinearGradient(W / 2 - 100, btnY - 25, W / 2 + 100, btnY + 25);
   btnGrad.addColorStop(0, '#2244aa'); btnGrad.addColorStop(1, '#4466cc');
   ctx.fillStyle = btnGrad; ctx.fill();
-  ctx.shadowBlur = 15; ctx.shadowColor = '#4488ff88';
   ctx.strokeStyle = '#6688dd'; ctx.lineWidth = 1; ctx.stroke();
-  ctx.shadowBlur = 0; ctx.restore();
+  ctx.restore();
 
   const pulse = 0.8 + Math.sin(frameCount * 0.06) * 0.2;
   ctx.save(); ctx.globalAlpha = pulse;
@@ -2539,17 +3017,14 @@ function drawLevelComplete(): void {
   ctx.fillStyle = panelGrad; ctx.fill();
   ctx.strokeStyle = '#4466aa'; ctx.lineWidth = 1; ctx.stroke();
 
-  ctx.shadowBlur = 15; ctx.shadowColor = '#ffdd44';
   drawText('关卡完成!', W / 2, 250, 28, '#ffdd44');
-  ctx.shadowBlur = 0;
 
   for (let i = 0; i < 3; i++) {
     const sx = W / 2 - 60 + i * 60;
     const filled = i < stars;
     ctx.font = `${filled ? 36 : 30}px serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    if (filled) { ctx.shadowBlur = 10; ctx.shadowColor = '#ffdd44'; }
     ctx.fillStyle = filled ? '#ffdd44' : '#333355';
-    ctx.fillText('\u2605', sx, 300); ctx.shadowBlur = 0;
+    ctx.fillText('\u2605', sx, 300);
   }
 
   drawText(`得分: ${levelScore}`, W / 2, 360, 20, '#ffffff');
@@ -2577,8 +3052,7 @@ function drawGameOver(): void {
   drawText(`到达第 ${level} 关`, W / 2, 295, 16, '#8899bb');
 
   if (totalScore >= highScore && totalScore > 0) {
-    ctx.save(); ctx.shadowBlur = 10; ctx.shadowColor = '#ffdd44';
-    drawText('新纪录!', W / 2, 335, 22, '#ffdd44'); ctx.restore();
+    drawText('新纪录!', W / 2, 335, 22, '#ffdd44');
   }
 
   drawText('排行榜', W / 2, 380, 16, '#aabbcc');
@@ -2634,12 +3108,17 @@ function updateGemAnimations(dt: number): void {
     if (!gem) continue;
 
     const prevVy = gem.vy;
-    gem.vx += (0 - gem.vx) * Math.min(1, speed * dt);
+    // Ease-out-back for swap: snappy with slight overshoot
+    const swapEase = Math.min(1, speed * 1.3 * dt);
+    gem.vx += (0 - gem.vx) * swapEase;
+    // Add slight overshoot for swap feel (only when swapping, not falling)
+    if (Math.abs(gem.vx) > 0.5 && Math.abs(gem.vx) < 5 && gem.swapPop > 0) {
+      gem.vx *= 0.92; // dampen overshoot
+    }
 
     // Quadratic easing for falling: accelerate as gems fall
     if (Math.abs(gem.vy) > 0.5) {
-      // Use quadratic easing: speed up as offset decreases
-      const fallSpeed = speed * (1 + Math.abs(gem.vy) / 100); // accelerate based on remaining distance
+      const fallSpeed = speed * (1 + Math.abs(gem.vy) / 100);
       gem.vy += (0 - gem.vy) * Math.min(1, fallSpeed * dt);
     } else {
       gem.vy = 0;
@@ -2649,7 +3128,7 @@ function updateGemAnimations(dt: number): void {
     if (gem.landBounce > 0 && Math.abs(gem.vy) < 2 && Math.abs(prevVy) > 8) {
       // Trigger bounce spring
       gem.landBounceV = 1;
-      SFX.landClink();
+      SFX.landClink(c, Math.abs(prevVy) / (CELL + GAP));
       // Spawn dust particles at landing point
       if (!gem.dustSpawned) {
         gem.dustSpawned = true;
@@ -2722,6 +3201,7 @@ function allAnimsDone(): boolean {
 }
 
 function update(dt: number): void {
+  if (paused) return;
   frameCount++;
   let effectiveDt = dt;
   if (slowMoTimer > 0) { slowMoTimer -= dt; effectiveDt = dt * slowMo; if (slowMoTimer <= 0) slowMo = 1.0; }
@@ -2730,9 +3210,10 @@ function update(dt: number): void {
   if (comboTextTimer > 0) comboTextTimer -= dt;
   if (multiplierTimer > 0) multiplierTimer -= dt;
   if (boardBreathTimer > 0) { boardBreathTimer -= dt; if (boardBreathTimer <= 0) boardBreathMag = 0; }
-  if (boardBreathMag > 0) boardBreathMag *= (1 - dt * 2);
+  if (boardBreathMag > 0) { boardBreathMag *= (1 - dt * 2); if (boardBreathMag < 0.001) boardBreathMag = 0; }
   if (boardPulseTimer > 0) boardPulseTimer -= dt;
   if (boardBrightenTimer > 0) boardBrightenTimer -= dt;
+  if (previewTimer > 0) { previewTimer -= dt; if (previewTimer <= 0) previewCells = []; }
   if (boardSlamTimer > 0) {
     boardSlamTimer -= dt;
     if (boardSlamPhase === 'lift' && boardSlamTimer < 0.2) boardSlamPhase = 'slam';
@@ -2742,6 +3223,9 @@ function update(dt: number): void {
   if (hitstopActive && hitstopTimer <= 0) hitstopActive = false;
   // Score pop timer
   if (scorePopTimer > 0) scorePopTimer -= dt;
+  // Button press timers
+  if (pauseBtnPressTimer > 0) pauseBtnPressTimer -= dt;
+  if (muteBtnPressTimer > 0) muteBtnPressTimer -= dt;
   // Detect score change for pop effect
   const currentDispScore = Math.floor(displayScore);
   if (currentDispScore > lastDisplayedScore + 5) {
@@ -2780,6 +3264,8 @@ function update(dt: number): void {
   updateParticles(effectiveDt);
   updateFloatingTexts(effectiveDt);
   updateAmbientParticles(effectiveDt);
+  updateConfetti(dt);
+  updateShengKeStrokes(effectiveDt);
 
   // D. Update ambient drone based on board state
   if (audioInited && screen === 'playing') {
@@ -2790,6 +3276,7 @@ function update(dt: number): void {
   if (screen !== 'playing') return;
 
   updateGemAnimations(effectiveDt);
+  updateShengKe(effectiveDt);
   animTimer -= effectiveDt;
 
   switch (boardState) {
@@ -2797,9 +3284,10 @@ function update(dt: number): void {
 
     case 'swapping':
       if (animTimer <= 0 && allAnimsDone()) {
+        isPlayerSwap = true; // Player just swapped
         const g1 = grid[swapR1][swapC1], g2 = grid[swapR2][swapC2];
         if (g1 && g2 && g1.special !== SP_NONE && g2.special !== SP_NONE) {
-          if (handleSpecialCombo(swapR1, swapC1, swapR2, swapC2)) { movesLeft--; justSwapped = false; hintTimer = 0; hintR1 = -1; idleTimer = 0; break; }
+          if (handleSpecialCombo(swapR1, swapC1, swapR2, swapC2)) { movesLeft--; justSwapped = false; hintTimer = 0; hintR1 = -1; idleTimer = 0; isPlayerSwap = false; break; }
         }
         boardState = 'checking';
       }
@@ -2836,7 +3324,7 @@ function update(dt: number): void {
       break;
 
     case 'destroying':
-      if (animTimer <= 0) {
+      if (animTimer <= 0 && !hasShengKePending()) {
         removeDestroyedGems(); placeSpecials();
         const maxDrop = applyGravity();
         boardState = 'falling'; animTimer = Math.max(0.15, maxDrop * ANIM_FALL_ROW);
@@ -2844,7 +3332,7 @@ function update(dt: number): void {
       break;
 
     case 'falling':
-      if (animTimer <= 0 && allAnimsDone()) boardState = 'checking';
+      if (animTimer <= 0 && allAnimsDone()) { isPlayerSwap = false; boardState = 'checking'; }
       break;
 
     case 'shuffle':
@@ -2859,7 +3347,7 @@ function update(dt: number): void {
       bonusTimer -= dt;
       if (bonusTimer <= 0 && bonusPhase === 'placing') {
         if (bonusMoves > 0) {
-          bonusMoves--; movesLeft--;
+          bonusMoves--;
           const validCells: {r: number, c: number}[] = [];
           for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
             if (grid[r][c] && grid[r][c]!.special === SP_NONE) validCells.push({ r, c });
@@ -2898,7 +3386,7 @@ function update(dt: number): void {
 
   // After cascades from bonus resolve
   if (bonusPhase === 'done' && boardState === 'idle') {
-    bonusPhase = 'placing';
+    bonusPhase = 'none';
     finishLevel();
   }
 }
@@ -2907,17 +3395,42 @@ function update(dt: number): void {
 // RENDER
 // ============================================================================
 
+function drawTitleMuteButton(): void {
+  ctx.save();
+  ctx.globalAlpha = 0.7;
+  const muteBtnX = W - 30, muteBtnY = 30;
+  const titleMuteScale = muteBtnPressTimer > 0 ? 0.9 : 1.0;
+  ctx.translate(muteBtnX, muteBtnY);
+  ctx.scale(titleMuteScale, titleMuteScale);
+  ctx.font = 'bold 20px serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = muted ? '#ff6644' : '#ffffff';
+  ctx.fillText(muted ? '\u2717' : '\u266B', 0, 0);
+  ctx.restore();
+}
+
+function drawPauseOverlay(): void {
+  ctx.save();
+  ctx.globalAlpha = 0.7;
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+  drawText('\u6682\u505C', W / 2, H / 2 - 30, 48, '#ffffff'); // 暂停
+  drawText('\u70B9\u51FB\u7EE7\u7EED', W / 2, H / 2 + 30, 18, '#8899bb'); // 点击继续
+}
+
 function render(): void {
   ctx.clearRect(0, 0, W, H);
-  if (screen === 'title') { drawTitle(); drawParticles(); return; }
+  if (screen === 'title') { drawTitle(); drawParticles(); drawTitleMuteButton(); return; }
 
   ctx.save(); ctx.translate(shakeX, shakeY);
-  drawBackground(); drawBoard(); drawHUD();
+  drawBackground(); drawBoard(); drawShengKeStrokes(); drawHUD();
   drawParticles(); drawFloatingTexts(); drawComboText();
   ctx.restore();
 
   drawScreenFlash();
-  if (screen === 'levelComplete') drawLevelComplete();
+  if (paused) { drawPauseOverlay(); return; }
+  if (screen === 'levelComplete') { drawLevelComplete(); drawConfetti(); }
   if (screen === 'gameOver') drawGameOver();
 }
 
@@ -2939,11 +3452,17 @@ function gameLoop(timestamp: number): void {
 loadLeaderboardData();
 loadHighScore();
 
+// Load mute state
+try {
+  muted = localStorage.getItem('shattered_stars_muted') === '1';
+} catch { /* ignore */ }
+
 // Suppress unused
 void matchSetsThisStep;
 void levelTransTimer;
 void FIRE; void WATER; void WOOD; void METAL; void EARTH;
 void hitstopActive;
+void isPlayerSwap;
 
 lastTime = performance.now();
 requestAnimationFrame(gameLoop);
